@@ -612,5 +612,51 @@ class TestLaneAwareAvailability(unittest.TestCase):
         self.assertEqual(thin & thick, set())
 
 
+class TestCleanKeepsDocumentation(unittest.TestCase):
+    """`ladder clean` removes generated artifacts and never a README.
+
+    The shell one-liner this replaces — `rm -rf 40-runs/*.md 10-returns/*` —
+    also deleted the README documenting each directory, and `git add -A` then
+    staged the deletion silently. It happened twice in this repo before anyone
+    noticed, which is exactly how a directory ends up unexplained.
+    """
+
+    def test_clean_spares_readmes_and_removes_the_rest(self):
+        from runner.workspace import clean
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for directory in ("10-returns", "40-runs", "20-graph", "30-queries"):
+                (root / directory).mkdir()
+                (root / directory / "README.md").write_text("# docs\n")
+            (root / "10-returns" / "run-1").mkdir()
+            (root / "10-returns" / "run-1" / "a.json").write_text("{}")
+            (root / "40-runs" / "run-1.md").write_text("# run\n")
+            (root / "20-graph" / "outcomes.jsonl").write_text("{}\n")
+            (root / "30-queries" / "needs-human.md").write_text("# queue\n")
+
+            removed = clean(root)
+
+            for directory in ("10-returns", "40-runs", "20-graph", "30-queries"):
+                self.assertTrue((root / directory / "README.md").exists(),
+                                f"clean deleted {directory}/README.md")
+            self.assertFalse((root / "10-returns" / "run-1").exists())
+            self.assertFalse((root / "40-runs" / "run-1.md").exists())
+            self.assertFalse((root / "20-graph" / "outcomes.jsonl").exists())
+            self.assertFalse((root / "30-queries" / "needs-human.md").exists())
+            self.assertEqual(len(removed), 4)
+
+    def test_clean_resolves_its_root_at_call_time(self):
+        """A module-level default would bind at import and clean the real
+        workspace instead — the same defect already found in gate.escalate()."""
+        import inspect
+        from runner.workspace import clean
+        self.assertIsNone(inspect.signature(clean).parameters["root"].default)
+
+    def test_clean_is_idempotent(self):
+        from runner.workspace import clean
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(clean(pathlib.Path(tmp)), [])
+
+
 if __name__ == "__main__":
     unittest.main()

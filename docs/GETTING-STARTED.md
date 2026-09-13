@@ -233,8 +233,22 @@ counts climb.
 ## Step 8 — Undo everything
 
 ```bash
-rm -rf 40-runs/*.md 10-returns/* 20-graph/outcomes.jsonl 30-queries/needs-human.md
+./ladder clean
 ```
+
+```
+removed 10-returns/20260913T141256Z-triage-failures
+removed 40-runs/20260913T141256Z-triage-failures.md
+removed 20-graph/outcomes.jsonl
+removed 20-graph/substrate.json
+removed 30-queries/needs-human.md
+
+5 generated artifacts removed. Outcome history is now empty — the policy has forgotten everything.
+```
+
+Use the command, not `rm -rf 40-runs/*.md 10-returns/*` — that glob also eats
+the README documenting each directory, and `git add -A` then quietly stages the
+deletion. That happened here, twice, before anyone noticed.
 
 All of those are generated and gitignored. A fresh clone starts with an empty
 outcome history on purpose — inheriting someone else's would mean believing

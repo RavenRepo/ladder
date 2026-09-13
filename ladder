@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from runner import policy as policy_mod           # noqa: E402
 from runner import substrate as substrate_mod     # noqa: E402
 from runner import tiers as tiers_mod             # noqa: E402
+from runner import workspace as workspace_mod     # noqa: E402
 from runner.launch import Launch, load_launch, list_launches  # noqa: E402
 from runner.lint import lint, lint_all                        # noqa: E402
 from runner.run import Stop, execute              # noqa: E402
@@ -221,6 +222,22 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_clean(args) -> int:
+    """Delete generated run artifacts, keeping every README.
+
+    The logic lives in `runner/workspace.py`; this prints the result.
+    """
+    removed = workspace_mod.clean()
+    if not removed:
+        print("nothing to clean.")
+        return 0
+    for item in removed:
+        print(f"removed {item}")
+    print(f"\n{len(removed)} generated artifacts removed. "
+          f"Outcome history is now empty — the policy has forgotten everything.")
+    return 0
+
+
 def cmd_review(args) -> int:
     """Assemble the weekly meta-review prompt. It proposes a diff; you apply it."""
     import datetime as dt
@@ -288,6 +305,11 @@ def main() -> int:
     p.add_argument("--cap", type=int, help="hard cap on dispatches")
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_run)
+
+    sub.add_parser(
+        "clean",
+        help="delete generated run artifacts (keeps every README)"
+    ).set_defaults(fn=cmd_clean)
 
     p = sub.add_parser("review", help="build the weekly meta-review prompt")
     p.add_argument("--days", type=int, default=7)

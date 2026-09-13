@@ -129,8 +129,22 @@ costs nothing.
 To undo a mock run:
 
 ```bash
-rm -rf 40-runs/*.md 10-returns/* 20-graph/outcomes.jsonl 30-queries/needs-human.md
+./ladder clean
 ```
+
+```
+removed 10-returns/20260913T141256Z-triage-failures
+removed 40-runs/20260913T141256Z-triage-failures.md
+removed 20-graph/outcomes.jsonl
+removed 20-graph/substrate.json
+removed 30-queries/needs-human.md
+
+5 generated artifacts removed. Outcome history is now empty — the policy has forgotten everything.
+```
+
+Use the command, not `rm -rf 40-runs/*.md 10-returns/*` — that glob also eats
+the README documenting each directory, and `git add -A` then quietly stages the
+deletion. That happened here, twice, before anyone noticed.
 
 Run the tests the same way — they spend nothing and take under a second:
 
@@ -175,6 +189,16 @@ and the verifier rungs. Spends nothing.
 Runs it. `--dispatch mock` is the default and free. `--gate script` is gate 1
 only — also free, and the right setting for a first real run: find out whether
 the launch works before paying to verify its output.
+
+### `ladder clean`
+
+Deletes generated run artifacts — returns, run records, outcome history, probe
+health, the human queue — and **keeps every README**. Use this instead of a
+shell glob: `rm -rf 40-runs/*.md` also removes the file documenting the
+directory.
+
+Note that it erases `outcomes.jsonl`, which is the routing policy's entire
+memory. After a clean, every capability is unproven again.
 
 ### `ladder policy`
 
