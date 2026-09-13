@@ -511,5 +511,79 @@ class TestLowConfidenceDeferral(unittest.TestCase):
         self.assertEqual(cell.rate, 1.0)
 
 
+class TestNoModuleLevelPathDefaults(unittest.TestCase):
+    """Every writer resolves its path at CALL time, not at import.
+
+    A module-level default freezes the path when the module is imported, so a
+    caller that redirects it writes to the real file while believing it wrote to
+    its own. This is not a test-only nuisance: it silently appended simulated
+    failures to the real `needs-human.md`, which is the one file a human writes
+    decisions in. A queue full of things that never happened is a log, and logs
+    do not get read.
+    """
+
+    WRITERS = [("runner.gate", "escalate"),
+               ("runner.policy", "record"),
+               ("runner.policy", "load"),
+               ("runner.substrate", "write_health"),
+               ("runner.substrate", "read_health"),
+               ("runner.substrate", "available")]
+
+    def test_no_writer_binds_its_path_at_import(self):
+        import importlib
+        import inspect
+        for module_name, function_name in self.WRITERS:
+            module = importlib.import_module(module_name)
+            parameter = inspect.signature(
+                getattr(module, function_name)).parameters.get("path")
+            if parameter is None:
+                continue
+            self.assertIsNone(
+                parameter.default,
+                f"{module_name}.{function_name} binds `path` at import "
+                f"({parameter.default!r}); redirecting the module global will "
+                f"not affect it")
+
+    def test_escalate_honours_a_redirected_module_global(self):
+        from runner import gate as gate_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            redirected = pathlib.Path(tmp) / "needs-human.md"
+            real = gate_mod.NEEDS_HUMAN
+            try:
+                gate_mod.NEEDS_HUMAN = redirected
+                verdict = run_gate(Return(
+                    Work("c", "i", "p", "haiku-4.5"),
+                    {"capability": "c", "instance": "i", "claims": []}, "", True))
+                written = gate_mod.escalate([verdict], "test-run")
+            finally:
+                gate_mod.NEEDS_HUMAN = real
+            self.assertEqual(written, 1)
+            self.assertTrue(redirected.exists(),
+                            "escalate wrote somewhere other than the redirect")
+            self.assertIn("test-run", redirected.read_text())
+
+
+class TestDeferralReachesTheHumanQueueAtTheTop(unittest.TestCase):
+    """A record still unsure on the strongest rung is a person's decision."""
+
+    def test_deferral_at_the_top_of_the_ladder_is_queued(self):
+        from runner import gate as gate_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            redirected = pathlib.Path(tmp) / "needs-human.md"
+            real = gate_mod.NEEDS_HUMAN
+            try:
+                gate_mod.NEEDS_HUMAN = redirected
+                verdict = run_gate(Return(
+                    Work("c", "i", "p", "opus-5"),
+                    {"capability": "c", "instance": "i",
+                     "claims": [{"statement": "s", "evidence": "https://a.example/x"}],
+                     "confidence": 0.2}, "", True))
+                self.assertEqual(verdict.failure_class, "deferred")
+                self.assertEqual(gate_mod.escalate([verdict], "top"), 1)
+            finally:
+                gate_mod.NEEDS_HUMAN = real
+            self.assertIn("confidence", redirected.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -291,7 +291,9 @@ def probe_all(include_dead: bool = True, timeout: int = 30) -> list[Surface]:
     return surfaces
 
 
-def write_health(surfaces: list[Surface], path: pathlib.Path = HEALTH) -> None:
+def write_health(surfaces: list[Surface], path: pathlib.Path | None = None) -> None:
+    # Resolved at call time — see the note on `escalate()` in gate.py.
+    path = path or HEALTH
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "checked": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -300,7 +302,8 @@ def write_health(surfaces: list[Surface], path: pathlib.Path = HEALTH) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def read_health(path: pathlib.Path = HEALTH) -> dict:
+def read_health(path: pathlib.Path | None = None) -> dict:
+    path = path or HEALTH
     if not path.exists():
         return {"checked": None, "surfaces": []}
     try:
@@ -312,5 +315,5 @@ def read_health(path: pathlib.Path = HEALTH) -> dict:
         return {"checked": None, "surfaces": [], "corrupt": True}
 
 
-def available(path: pathlib.Path = HEALTH) -> list[str]:
+def available(path: pathlib.Path | None = None) -> list[str]:
     return [s["name"] for s in read_health(path).get("surfaces", []) if s.get("available")]

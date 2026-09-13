@@ -451,8 +451,15 @@ def run_gate(ret: Return, *, checkable=None, judgment=None,
 
 
 def escalate(verdicts: list[Verdict], run_id: str,
-             path: pathlib.Path = NEEDS_HUMAN) -> int:
+             path: pathlib.Path | None = None) -> int:
     """Append twice-failed work to the human queue.
+
+    `path` is resolved at CALL time. A module-level default freezes it at
+    import, so a caller that redirects NEEDS_HUMAN — a test, a scratch run, a
+    second workspace — writes to the real queue while believing it wrote to its
+    own. That is not a test-only nuisance: this file is the one a human writes
+    decisions in, and silently appending simulated failures to it is how the
+    five-minute-a-day queue becomes a log nobody reads.
 
     Appends under whatever header is already there and writes a header only
     into an empty file. This file is the one a human writes in — resolutions,
@@ -460,6 +467,7 @@ def escalate(verdicts: list[Verdict], run_id: str,
     """
     # `deferred` reaches here only when the ladder ran out of rungs, which is
     # exactly the case a person has to decide.
+    path = path or NEEDS_HUMAN
     actionable = [v for v in verdicts
                   if v.failure_class in ("quality", "deferred")]
     if not actionable:
