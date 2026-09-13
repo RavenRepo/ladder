@@ -21,15 +21,17 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import json
+import pathlib
 import random
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 
-from .substrate import KIROCC_BASE
+from .substrate import KIROCC_BASE, _event, _jsonl
 from .tiers import BY_NAME, Tier
 
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -80,6 +82,90 @@ class Return:
     # 429, missing CLI. Not evidence the work was bad, and it must never be
     # filed next to work that failed on its merits.
     transport_error: bool = False
+    # True when the dispatch SUCCEEDED but the rung that answered is not one
+    # this work may be recorded against — today, a verifier surface that routed
+    # to the generator's own model family. Distinct from `transport_error`
+    # because it is deterministic: retrying reproduces it, spends the surface's
+    # quota again and answers nothing. It must reach a person, the way gate 3's
+    # refusal does, rather than being retried clean and filed as noise.
+    inadmissible: bool = False
+
+
+def _final_message(events: list[dict]) -> dict:
+    """The assistant message carrying the answer, as a `data` payload.
+
+    Copilot tags the answering message `phase: "final_answer"` — verified in a
+    recorded stream, see tests/fixtures/copilot-session.jsonl. But `phase` is
+    OPTIONAL in copilot's own schema ("generation phase for phased-output
+    models"), so a model that does not phase its output emits no tag at all.
+
+    Keying only on the tag would return "" for such a model, and "" is not a
+    loud failure: `extract_json` yields None, the verdict is `malformed`, and
+    SCHEMA.md says malformed counts against the rung and is never retried. The
+    surface would be learned to be worthless without one error being raised.
+
+    So the tag is a preference, not a requirement, and the fallback is the last
+    assistant message that actually said something. Taking the LAST rather than
+    concatenating is what keeps tool-call narration out of the record.
+    """
+    fallback = {}
+    for event in reversed(events):
+        if event.get("type") != "assistant.message":
+            continue
+        data = event.get("data") or {}
+        if data.get("phase") == "final_answer":
+            return data
+        if not fallback and (data.get("content") or "").strip():
+            fallback = data
+    return fallback
+
+
+def _answer_text(events: list[dict]) -> str:
+    return _final_message(events).get("content") or ""
+
+
+def _answer_model(events: list[dict]) -> str | None:
+    """Which model produced the answer, per copilot's own event."""
+    return _final_message(events).get("model")
+
+
+def _session_input_tokens(usage: dict) -> int:
+    """Input tokens for the WHOLE dispatch, summed across every model it used.
+
+    `lastCallInputTokens` names exactly what it says — the most recent
+    main-agent API call. A thick-lane dispatch is multi-turn by definition, so
+    on any dispatch that used a tool that field is the tail of the work and not
+    the work, and it under-reports into the run record silently. `modelMetrics`
+    is per-model totals for the session, which is the quantity the audit trail
+    is asking for.
+    """
+    metrics = usage.get("modelMetrics")
+    if isinstance(metrics, dict):
+        total = sum((entry.get("usage") or {}).get("inputTokens", 0) or 0
+                    for entry in metrics.values() if isinstance(entry, dict))
+        if total:
+            return total
+    return usage.get("lastCallInputTokens", 0) or 0
+
+
+def _is_claude_family(model: str) -> bool:
+    """Whether copilot's router handed back an Anthropic model.
+
+    Matched on the id rather than a lookup table, because the router may name a
+    model this workspace has never heard of and the safe default for an unknown
+    id is "not Claude, but check the run record". Anthropic ids have carried
+    `claude` in them on every surface probed here.
+    """
+    return "claude" in (model or "").lower()
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def extract_json(text: str) -> dict | None:
@@ -379,9 +465,182 @@ def _pool(fn, works: list[tuple[Work, str]], concurrency: int) -> list[Return]:
     return results
 
 
+# GitHub meters Copilot in premium requests, one per model call, flat across
+# models. This is the published overage rate — what the marginal request costs
+# once the monthly allowance is spent. It is NOT measured on this account, and
+# inside the allowance the marginal cost is nearer zero. Recorded as a named
+# constant rather than inlined so that correcting it is a one-line diff.
+COPILOT_USD_PER_PREMIUM_REQUEST = 0.04
+
+# Copilot's names for the two capabilities the thick lane must not have. The
+# claude-cli adapter denies Bash/Edit/Write; these are the same two doors.
+COPILOT_DENIED = ["shell", "write"]
+
+
+class CopilotDispatcher:
+    """GitHub Copilot CLI in print mode. The thick lane's non-Claude family.
+
+    It exists so that thick-lane work has a verifier at all. Every `claude-cli`
+    rung is family `claude`, so before this surface `counter_family()` returned
+    [] in that lane and the gate had nothing admissible to check with.
+
+    Two things about this adapter are deliberate and worth not undoing.
+
+    **The model cannot be pinned, so one property is checked instead.**
+    `--model` exists but `auto` is the only value this account's CLI accepts —
+    passing the very id the router reports (`gpt-5.6-luna`) is rejected as "not
+    available". The tier therefore names no model and there is no id to match
+    against. What is checked is the single property this rung's admissibility
+    rests on: that the model which answered was **not Claude family**. If
+    GitHub adds a Claude model to the auto router — an ordinary product
+    change — every thick-lane gate 2 check would silently become same-family
+    verification, which is the one thing `counter_family()` exists to prevent,
+    and it would report success while doing it.
+
+    The check fails CLOSED. A return whose model cannot be determined is
+    refused rather than accepted, because "we could not tell" and "it was fine"
+    must not be the same outcome for the guard that holds up this whole rung.
+
+    **Failures are read from the event stream, not grepped out of the blob.**
+    Copilot writes its answer, its MCP server instructions and its errors to
+    the same stdout. Searching that text for "429" or "401" classifies a
+    correct answer *about* rate limits as an outage, and transport failures are
+    excluded from the pass rate — so the defect is silent and it corrupts
+    exactly the capability this workspace ships with.
+    """
+
+    name = "copilot"
+    lane = "thick"
+
+    def __init__(self, concurrency: int = 2, timeout: int = 600,
+                 cwd: str | None = None, **_):
+        self.concurrency = concurrency
+        self.timeout = timeout
+        self.cwd = cwd
+
+    def _command(self, prompt: str, usage_path: str) -> list[str]:
+        # No model parameter: "auto" is the only value this CLI accepts, and
+        # which rung answered is established afterwards in `_one`.
+        argv = [
+            "copilot", "-p", prompt, "--model", "auto",
+            "--output-format", "json", "--no-color", "--log-level", "none",
+            # Required for non-interactive: there is no approval surface.
+            "--allow-all-tools",
+            # ...which is why the two dangerous tools are denied explicitly.
+            # --deny-tool takes precedence over --allow-all-tools.
+            *[arg for tool in COPILOT_DENIED for arg in ("--deny-tool", tool)],
+            # A dispatch must not publish. The default exports the session to
+            # GitHub web and mobile, which sends repo content off this machine
+            # as a side effect of running a gate.
+            "--no-remote-export", "--no-remote",
+            # Nothing here should ask a question it cannot receive an answer to.
+            "--no-ask-user",
+            # Copilot auto-loads AGENTS.md from the working directory into its
+            # system prompt. Leaving that on makes the measured context weight
+            # a property of where you ran it, and this adapter takes an
+            # arbitrary `cwd` — so the same rung would carry a different fixed
+            # overhead per launch and the number in tiers.py would mean nothing.
+            # It does not restrict file access; the agent can still read.
+            "--no-custom-instructions",
+            "--usage-output-file", usage_path,
+        ]
+        return argv
+
+    def _one(self, work: Work, prompt: str) -> Return:
+        tier: Tier = BY_NAME[work.tier]
+        if shutil.which("copilot") is None:
+            return Return(work, None, "", False, "the `copilot` CLI is not on PATH",
+                          0.0, transport_error=True)
+
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory() as tmp:
+            usage_path = str(pathlib.Path(tmp) / "usage.json")
+            try:
+                proc = subprocess.run(
+                    self._command(prompt, usage_path),
+                    capture_output=True, text=True,
+                    timeout=self.timeout, cwd=self.cwd,
+                )
+            except subprocess.TimeoutExpired:
+                return Return(work, None, "", False,
+                              f"copilot timed out after {self.timeout}s",
+                              time.monotonic() - started, transport_error=True)
+            except Exception as exc:                          # noqa: BLE001
+                # Matches the claude-cli adapter: re-raising here would escape
+                # future.result() and discard every sibling's paid-for output.
+                return Return(work, None, "", False, f"{type(exc).__name__}: {exc}",
+                              time.monotonic() - started, transport_error=True)
+            seconds = time.monotonic() - started
+            usage = _read_json(usage_path)
+
+        events = _jsonl(proc.stdout)
+        result = _event(events, "result")
+        if result is None:
+            return Return(work, None, proc.stdout, False,
+                          f"copilot produced no result event "
+                          f"(exit {proc.returncode}): {proc.stderr.strip()[:200]}",
+                          seconds, transport_error=True)
+        # Read the spend BEFORE any early return. AGENTS.md invariant 6:
+        # anything that spends a dispatch appears in the run record. A non-zero
+        # exit after the model already ran has spent premium requests, and
+        # dropping them here under-reports RunResult.cost_usd — the run record
+        # is the meta-review's only input, so a cost it cannot see did not
+        # happen as far as every later decision is concerned.
+        premium = (result.get("usage") or {}).get("premiumRequests", 0) or 0
+        cost = premium * COPILOT_USD_PER_PREMIUM_REQUEST
+        tokens_in = _session_input_tokens(usage)
+
+        if result.get("exitCode", 1) != 0:
+            return Return(work, None, proc.stdout, False,
+                          f"copilot exited {result.get('exitCode')}",
+                          seconds, cost, tokens_in, transport_error=True)
+
+        # Which model actually answered. Copilot chose it, not us, and it
+        # chooses per task: one prompt here resolved to `gpt-5.6-luna` and the
+        # next to `mai-code-1.1-flash`. The tier does not name a model for that
+        # reason, so there is no id to match — but there is still one property
+        # that has to hold.
+        # Prefer the answering message: `session.auto_mode_resolved` is
+        # @experimental and documents itself as the model settled on for the
+        # FIRST prompt of an auto-mode session, which is not the same claim as
+        # "the model that produced this answer". It is a fallback, not the
+        # source of truth.
+        resolved = _event(events, "session.auto_mode_resolved") or {}
+        answered = _answer_model(events) or resolved.get("chosenModel")
+        if not answered or _is_claude_family(answered):
+            # Fails closed on BOTH branches, and they are one branch on
+            # purpose. This rung is admissible as a thick-lane verifier for
+            # exactly one reason: it is not the family it is checking. A return
+            # whose model came back Claude breaks that outright; a return whose
+            # model cannot be read leaves it unestablished. Accepting the
+            # second while refusing the first would mean the guard protecting
+            # the entire gate no-ops the moment an event is missing.
+            why = (f"copilot routed to {answered!r}, which is Claude family"
+                   if answered else
+                   "copilot did not report which model answered")
+            return Return(work, None, proc.stdout, False,
+                          f"{why}. This rung is admissible as a cross-family "
+                          f"verifier only while neither is true, so the return "
+                          f"is refused rather than counted as a check.",
+                          seconds, cost, tokens_in, inadmissible=True)
+
+        text = _answer_text(events)
+        record = extract_json(text)
+        if record is None:
+            return Return(work, None, text, False, "no json object in the reply",
+                          seconds, cost, tokens_in)
+        return Return(work, record, text, True, None, seconds, cost, tokens_in)
+
+    def run(self, works: list[tuple[Work, str]]) -> list[Return]:
+        if not works:
+            return []
+        return _pool(self._one, works, self.concurrency)
+
+
 DISPATCHERS = {
     "kirocc": KiroccDispatcher,
     "claude-cli": ClaudeCliDispatcher,
+    "copilot": CopilotDispatcher,
     "mock": MockDispatcher,
 }
 

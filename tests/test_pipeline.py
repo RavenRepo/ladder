@@ -14,6 +14,7 @@ import random
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -117,15 +118,291 @@ class TestGate(unittest.TestCase):
         self.assertEqual(tiers.BY_NAME[strong].family, "gpt")
         self.assertLessEqual(tiers.BY_NAME[strong].rank, tiers.BY_NAME[cheap].rank)
 
+    def test_a_verifier_outage_is_not_charged_to_the_generator(self):
+        """AGENTS.md invariant 3. The generator returned a clean record; the
+        VERIFIER never answered. Filing that as a quality failure depresses the
+        generator rung's pass rate over someone else's outage and climbs the
+        ladder for a reason that has nothing to do with capability — for as
+        long as the outage lasts.
+
+        `ModelVerifier` has carried a comment saying this must not be recorded
+        as a quality failure since it was written; before `verifier_transport`
+        existed there was no way for that to be true.
+        """
+        from runner.gate import VerifierResult
+
+        class Outage:
+            stage = CHECKABLE
+
+            def __call__(self, ret, **_):
+                return VerifierResult(False, ["verifier transport failure: 502"],
+                                      True, "copilot-auto", transport=True)
+
+        generator = Return(Work("c", "i", "p", "cli-opus-4.5"), self.GOOD, "", True)
+        self.assertFalse(generator.transport_error)
+        verdict = run_gate(generator, checkable=Outage())
+        self.assertEqual(verdict.failure_class, "transport")
+
+    def test_a_verifier_rejection_on_the_merits_is_still_a_quality_failure(self):
+        """The other side of it: a verifier that ANSWERED and said no must keep
+        counting, or the fix above would hide every real rejection."""
+        from runner.gate import VerifierResult
+
+        class Rejects:
+            stage = CHECKABLE
+
+            def __call__(self, ret, **_):
+                return VerifierResult(False, ["evidence does not support it"],
+                                      True, "copilot-auto")
+
+        generator = Return(Work("c", "i", "p", "cli-opus-4.5"), self.GOOD, "", True)
+        self.assertEqual(run_gate(generator, checkable=Rejects()).failure_class,
+                         "quality")
+
     def test_no_verifier_available_fails_closed(self):
         """Passing a record because no verifier was reachable would mark it
         verified on the strength of an outage."""
         verifier = ModelVerifier(CHECKABLE, available=set())
-        ok, reasons, retryable, tier = verifier(
+        ok, reasons, retryable, tier, _ = verifier(
             Return(Work("c", "i", "p", "haiku-4.5"), self.GOOD, "", True))
         self.assertFalse(ok)
         self.assertIsNone(tier)
         self.assertTrue(retryable)
+
+
+class TestCopilotSurface(unittest.TestCase):
+    """The thick lane's non-Claude rung, and the two ways adding it could go wrong."""
+
+    def _events(self, *, model="gpt-5.6-luna", content="{}", exit_code=0,
+                premium=1):
+        import json
+        rows = [
+            {"type": "session.auto_mode_resolved",
+             "data": {"chosenModel": model, "availableModels": [model],
+                      "fallback": False}},
+            {"type": "assistant.message",
+             "data": {"model": model, "content": content,
+                      "phase": "final_answer"}},
+            {"type": "result", "exitCode": exit_code,
+             "usage": {"premiumRequests": premium}},
+        ]
+        return "\n".join(json.dumps(r) for r in rows)
+
+    def _run(self, stdout, tier="copilot-auto"):
+        import types
+        from unittest import mock
+        work = Work("c", "i", "p", tier)
+        dispatcher = dispatch_mod.CopilotDispatcher()
+        proc = types.SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+        with mock.patch.object(dispatch_mod.shutil, "which", return_value="/usr/bin/copilot"), \
+             mock.patch.object(dispatch_mod.subprocess, "run", return_value=proc):
+            return dispatcher._one(work, "p")
+
+    def test_thick_lane_has_a_cross_family_verifier(self):
+        """Before this rung, counter_family() was [] for every thick tier, so
+        gate 2 failed closed and gate 3 refused. `gate: full` was unreachable
+        in the lane where the expensive work happens."""
+        for generator in ("cli-opus-4.5", "cli-sonnet-4.5", "cli-haiku-4.5"):
+            picked = ModelVerifier(CHECKABLE).pick(generator)
+            self.assertIsNotNone(picked, f"gate 2 has no verifier for {generator}")
+            self.assertNotEqual(tiers.BY_NAME[picked].family,
+                                tiers.BY_NAME[generator].family)
+            self.assertEqual(tiers.BY_NAME[picked].lane,
+                             tiers.BY_NAME[generator].lane)
+
+    def test_a_thick_rung_does_not_move_the_thin_lane_verifiers(self):
+        """A surface added to one lane must not silently repoint the gate in the
+        other. A previous rung added with an all-zero cost became the cheapest
+        counter-family candidate everywhere and captured gate 2 for the whole
+        ladder."""
+        for generator in ("haiku-4.5", "sonnet-5", "opus-4.5"):
+            picked = ModelVerifier(CHECKABLE).pick(generator)
+            self.assertEqual(tiers.BY_NAME[picked].family, "gpt")
+            self.assertEqual(tiers.BY_NAME[picked].lane, "thin")
+
+    def test_no_thick_rung_prices_itself_at_zero(self):
+        """A rung that costs nothing under every weighting wins every
+        comparison, and the ladder stops meaning anything."""
+        for tier in tiers.in_lane("thick"):
+            self.assertGreater(tier.cost.objective(w_usd=1.0), 0.0, tier.name)
+
+    def test_a_rung_whose_model_is_chosen_per_dispatch_never_generates(self):
+        """Price is not a lever for this and must not be used as one.
+
+        copilot-auto is CHEAPER than cli-haiku-4.5 ($0.0400 vs $0.0468) and
+        lighter than every claude-cli rung (15,510 tokens vs 22,800+), so it
+        sorts first under both the usd and the tokens weighting and the explore
+        step routed real work onto it — 52 of 300 dispatches from a
+        cli-opus-4.5 floor, each filed under a rung name while some model
+        GitHub's router chose did the work. `verifier_only` is what prevents
+        that; the price never did.
+        """
+        import random
+        from runner.policy import choose
+        for weights in ({"w_usd": 1.0}, {"w_tokens": 1.0}, {"w_seconds": 1.0}):
+            names = [t.name for t in tiers.climb_order("thick", weights=weights)]
+            self.assertNotIn("copilot-auto", names, weights)
+        picked = {choose("newcap", lane="thick", floor_tier="cli-opus-4.5",
+                         outcomes=[], rng=random.Random(seed)).tier
+                  for seed in range(300)}
+        self.assertNotIn("copilot-auto", picked)
+
+    def test_a_verifier_only_rung_is_still_admissible_as_a_verifier(self):
+        """The flag must keep it out of generation WITHOUT taking away the one
+        thing it was added for."""
+        self.assertEqual(ModelVerifier(CHECKABLE).pick("cli-opus-4.5"),
+                         "copilot-auto")
+
+    def test_no_escalation_path_climbs_onto_a_verifier_only_rung(self):
+        """Escalation is the other door into generation."""
+        for tier in tiers.LADDER:
+            for target in tiers.escalation_path(tier.name):
+                self.assertFalse(target.verifier_only,
+                                 f"{tier.name} escalates to {target.name}")
+
+    def test_the_recorded_session_parses(self):
+        """Pinned against a REAL copilot stream, not a hand-built one.
+
+        Every other test here builds its own events, which means they all agree
+        with whatever this adapter assumed about copilot's schema. This one
+        disagrees with it if the assumption was wrong.
+        """
+        import pathlib as _pathlib
+        raw = (_pathlib.Path(__file__).parent / "fixtures"
+               / "copilot-session.jsonl").read_text()
+        events = dispatch_mod._jsonl(raw)
+        self.assertEqual(dispatch_mod._answer_text(events), "OK")
+        self.assertEqual(dispatch_mod._answer_model(events), "gpt-5.6-luna")
+        self.assertEqual(dispatch_mod._event(events, "result")["exitCode"], 0)
+        self.assertEqual(
+            dispatch_mod._event(events, "result")["usage"]["premiumRequests"], 1)
+
+    def test_an_untagged_assistant_message_is_still_the_answer(self):
+        """`phase` is optional in copilot's schema — only phased-output models
+        populate it. Requiring the tag would return "" for every other model,
+        and "" is filed `malformed`, which counts against the rung and is never
+        retried. The surface would be learned worthless in silence."""
+        import json
+        rows = [
+            {"type": "assistant.message",
+             "data": {"model": "mai-code-1.1-flash", "content": '{"a": 1}'}},
+            {"type": "result", "exitCode": 0, "usage": {"premiumRequests": 1}},
+        ]
+        ret = self._run("\n".join(json.dumps(r) for r in rows))
+        self.assertTrue(ret.ok, ret.error)
+        self.assertEqual(ret.record, {"a": 1})
+
+    def test_narration_before_the_answer_is_not_mistaken_for_it(self):
+        """The fallback takes the LAST assistant message with content, so a
+        JSON-shaped aside on the way to the answer does not become the record."""
+        import json
+        rows = [
+            {"type": "assistant.message",
+             "data": {"model": "m", "content": 'let me check {"wrong": true}'}},
+            {"type": "assistant.message",
+             "data": {"model": "m", "content": '{"right": true}'}},
+            {"type": "result", "exitCode": 0, "usage": {"premiumRequests": 1}},
+        ]
+        ret = self._run("\n".join(json.dumps(r) for r in rows))
+        self.assertEqual(ret.record, {"right": True})
+
+    def test_an_answer_about_rate_limits_is_not_filed_as_transport(self):
+        """The adapter reads copilot's event stream rather than grepping its
+        stdout. Copilot writes the answer, the MCP instructions and its errors
+        to the same stream, so a substring search for "429" classifies a correct
+        answer ABOUT rate limits as an outage — and transport failures are
+        excluded from the pass rate, so the loss is silent."""
+        answer = ('{"capability":"triage-failures",'
+                  '"instance":"HTTP 429: Too Many Requests",'
+                  '"claims":[{"statement":"class: substrate",'
+                  '"evidence":"ladder/40-runs/x.md:12"}],"confidence":0.9}')
+        ret = self._run(self._events(content=answer))
+        self.assertFalse(ret.transport_error, ret.error)
+        self.assertTrue(ret.ok, ret.error)
+        self.assertEqual(ret.record["instance"], "HTTP 429: Too Many Requests")
+
+    def test_a_claude_answer_is_refused_rather_than_counted_as_cross_family(self):
+        """This rung is admissible as a thick-lane verifier only because it is
+        not Claude family. Copilot's router picks per task and can reach Claude
+        models, so a return that came back from one would be same-family
+        verification wearing a cross-family rung's name — failing silently and
+        reporting success, which is the exact failure counter_family() exists
+        to make impossible."""
+        ret = self._run(self._events(model="claude-sonnet-4.5"))
+        self.assertFalse(ret.ok)
+        self.assertIn("claude-sonnet-4.5", ret.error)
+        # NOT transport: the dispatch answered and spent a premium request.
+        # Transport would be retried clean against a deterministic condition,
+        # spend the quota again for the same refusal, and never reach a person.
+        self.assertFalse(ret.transport_error)
+        self.assertTrue(ret.inadmissible)
+
+    def test_an_unreportable_model_is_refused_too(self):
+        """The guard fails closed. `if answered and is_claude(answered)` would
+        no-op the moment copilot omitted the field, and the one check holding up
+        this rung's admissibility would silently pass everything."""
+        import json
+        rows = [{"type": "assistant.message", "data": {"content": '{"a":1}'}},
+                {"type": "result", "exitCode": 0, "usage": {"premiumRequests": 1}}]
+        ret = self._run("\n".join(json.dumps(r) for r in rows))
+        self.assertFalse(ret.ok)
+        self.assertTrue(ret.inadmissible)
+        self.assertIn("did not report which model", ret.error)
+
+    def test_an_inadmissible_verifier_reaches_a_human_and_is_not_retried(self):
+        """Mirrors gate 3's refusal. If GitHub adds a Claude model to the auto
+        router, thick-lane gate 2 stops verifying — that must surface, not be
+        retried clean and filed as transport noise where nothing reads it."""
+        from runner.gate import VerifierResult
+
+        class Inadmissible:
+            stage = CHECKABLE
+
+            def __call__(self, ret, **_):
+                return VerifierResult(
+                    False, ["verifier inadmissible: copilot routed to "
+                            "'claude-sonnet-4.5', which is Claude family"],
+                    False, "copilot-auto")
+
+        gen = Return(Work("c", "i", "p", "cli-opus-4.5"),
+                     {"capability": "c", "instance": "i",
+                      "claims": [{"statement": "s", "evidence": "src/a.py:1"}]},
+                     "", True)
+        verdict = run_gate(gen, checkable=Inadmissible())
+        self.assertFalse(verdict.retryable)
+        self.assertNotEqual(verdict.failure_class, "transport")
+
+    def test_input_tokens_cover_the_whole_dispatch_not_the_last_call(self):
+        """`lastCallInputTokens` is the tail of a multi-turn dispatch, and the
+        run record is the meta-review's only input."""
+        summed = dispatch_mod._session_input_tokens({
+            "lastCallInputTokens": 400,
+            "modelMetrics": {"a": {"usage": {"inputTokens": 15_000}},
+                             "b": {"usage": {"inputTokens": 2_000}}}})
+        self.assertEqual(summed, 17_000)
+        self.assertEqual(
+            dispatch_mod._session_input_tokens({"lastCallInputTokens": 400}), 400)
+
+    def test_a_model_the_workspace_has_never_heard_of_is_still_accepted(self):
+        """The router names models this ladder does not list — the first live
+        dispatch came back from 'mai-code-1.1-flash'. Refusing every unknown id
+        would make the surface unusable; the property that must hold is that it
+        is not Claude."""
+        ret = self._run(self._events(model="mai-code-1.1-flash"))
+        self.assertTrue(ret.ok, ret.error)
+
+    def test_the_copilot_rung_can_never_serve_gate_3(self):
+        """Its model is decided per dispatch by someone else's router. Gate 3
+        refuses rather than seating a judge you cannot name in advance."""
+        for generator in ("cli-opus-4.5", "cli-sonnet-4.5", "cli-haiku-4.5"):
+            self.assertIsNone(ModelVerifier(JUDGMENT).pick(generator))
+
+    def test_the_premium_request_is_priced_not_discarded(self):
+        """Copilot meters premium requests, not dollars. Recording zero would
+        make every thick dispatch look free to the policy."""
+        ret = self._run(self._events(premium=3))
+        self.assertAlmostEqual(
+            ret.cost_usd, 3 * dispatch_mod.COPILOT_USD_PER_PREMIUM_REQUEST)
 
 
 class TestPolicy(unittest.TestCase):
@@ -356,16 +633,93 @@ class TestLint(unittest.TestCase):
         findings = lint(self._launch(text))
         self.assertTrue(any("nowhere to climb" in f for f in findings))
 
-    def test_a_gate_with_no_cross_family_rung_is_caught(self):
-        """The thick lane holds only Claude rungs, so `gate: full` there would
-        fail closed on every return."""
+    def test_gate_3_with_no_peer_or_stronger_judge_is_caught(self):
+        """`gate: full` at a floor with no peer-or-stronger rung of another
+        family sends every return to a human. The thick lane's only non-Claude
+        rung is `copilot-auto` at rank 5, so a cli-sonnet-4.5 floor (rank 2)
+        has a gate 2 verifier and no gate 3 judge — and a check that only asked
+        whether ANY counter-family rung exists would report this launch clean.
+
+        Named for gate 3 because that is the branch it exercises: no tier in
+        LADDER has an empty `counter_family()` any more, so the gate 2 branch
+        is unreachable from a real ladder and a test claiming to cover it would
+        be claiming coverage it does not have. The assertion names the gate 3
+        message specifically rather than the substring both messages share."""
         from runner.lint import lint
         text = self.HEAD.format(
             lane="thick", floor="cli-sonnet-4.5", gate="full", attempts=1,
             ret='{"capability":"probe","instance":"x","claims":'
                 '[{"statement":"s","evidence":"src/a.py:1"}]}')
         findings = lint(self._launch(text))
-        self.assertTrue(any("different model family" in f for f in findings))
+        self.assertTrue(any("gate 3 refuses" in f for f in findings), findings)
+        self.assertFalse(any("fail closed at gate 2" in f for f in findings),
+                         findings)
+
+    def test_gate_3_is_checked_at_the_rungs_a_retry_escalates_to(self):
+        """A launch is not run only at its floor. haiku-4.5 (rank 4) has gpt
+        judges above it, so the floor lints clean — but with max_attempts 2 the
+        first quality retry climbs to rank 0/1 where gate 3 refuses and every
+        record goes to a human. Checking the floor alone reports clean and
+        discovers it one retry later, at full price."""
+        from runner.lint import lint
+        text = self.HEAD.format(
+            lane="thin", floor="haiku-4.5", gate="full", attempts=2,
+            ret='{"capability":"probe","instance":"x","claims":'
+                '[{"statement":"s","evidence":"src/a.py:1"}]}')
+        findings = lint(self._launch(text))
+        self.assertTrue(any("escalation" in f and "gate 3 refuses" in f
+                            for f in findings), findings)
+
+    def test_a_verifier_on_a_dead_surface_is_not_a_verifier(self):
+        """`ModelVerifier.pick` filters candidates by the surfaces the probe
+        found live; a linter that does not is answering a different question
+        from the one the run will ask. The thick lane's entire gate hangs on one
+        optional third-party binary, and the cheapest check in the workspace has
+        to say so before a run spends anything."""
+        import tempfile as _tf, json as _json, pathlib as _pl
+        from runner import substrate as _sub
+        from runner.lint import lint
+        text = self.HEAD.format(
+            lane="thick", floor="cli-sonnet-4.5", gate="checkable", attempts=1,
+            ret='{"capability":"probe","instance":"x","claims":'
+                '[{"statement":"s","evidence":"src/a.py:1"}]}')
+        with _tf.TemporaryDirectory() as tmp:
+            health = _pl.Path(tmp) / "substrate.json"
+            health.write_text(_json.dumps({"checked": "now", "surfaces": [
+                {"name": "claude-cli", "available": True},
+                {"name": "copilot", "available": False}]}))
+            with unittest.mock.patch.object(_sub, "HEALTH", health):
+                findings = lint(self._launch(text))
+        self.assertTrue(any("did not find live" in f for f in findings), findings)
+
+    def test_gate_full_is_clean_where_a_peer_or_stronger_judge_exists(self):
+        """The other half of the rule, so it does not become a blanket refusal.
+        In the thin lane a haiku-4.5 floor (rank 4) has gpt rungs at rank 2
+        above it, so gate 3 has an admissible judge and the launch must NOT be
+        flagged."""
+        from runner.lint import lint
+        text = self.HEAD.format(
+            lane="thin", floor="haiku-4.5", gate="full", attempts=1,
+            ret='{"capability":"probe","instance":"x","claims":'
+                '[{"statement":"s","evidence":"src/a.py:1"}]}')
+        findings = lint(self._launch(text))
+        self.assertFalse([f for f in findings if "model family" in f], findings)
+
+    def test_gate_full_in_the_thick_lane_is_flagged_at_every_floor(self):
+        """The thick lane's only non-Claude rung is copilot, whose model is
+        chosen per dispatch by someone else's router. It is rank 5 on purpose,
+        so no thick floor has a peer-or-stronger judge and `gate: full` there
+        still sends every return to a human. The linter has to say so before
+        the run, not after."""
+        from runner.lint import lint
+        for floor in ("cli-opus-4.5", "cli-sonnet-4.5", "cli-haiku-4.5"):
+            text = self.HEAD.format(
+                lane="thick", floor=floor, gate="full", attempts=1,
+                ret='{"capability":"probe","instance":"x","claims":'
+                    '[{"statement":"s","evidence":"src/a.py:1"}]}')
+            findings = lint(self._launch(text))
+            self.assertTrue([f for f in findings if "model family" in f],
+                            f"{floor}: {findings}")
 
     def test_the_shipped_launch_lints_clean(self):
         from runner.launch import load_launch
@@ -425,7 +779,7 @@ class TestNoWeakJudgeOnStrongWork(unittest.TestCase):
 
     def test_refusing_routes_to_a_human_and_is_not_retried(self):
         """Retrying changes nothing: no rung on the ladder may judge this."""
-        ok, reasons, retryable, tier = ModelVerifier(JUDGMENT)(
+        ok, reasons, retryable, tier, _ = ModelVerifier(JUDGMENT)(
             Return(Work("c", "i", "p", "opus-5"),
                    {"capability": "c", "instance": "i",
                     "claims": [{"statement": "s", "evidence": "https://a.example/x"}]},

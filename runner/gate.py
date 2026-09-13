@@ -28,6 +28,7 @@ saturates: this loop will not keep paying forever.
 from __future__ import annotations
 
 import dataclasses
+import typing
 import json
 import pathlib
 import re
@@ -64,6 +65,11 @@ class Verdict:
     reasons: list[str]
     retryable: bool
     verifier_tier: str | None = None
+    # True when the VERIFIER never answered. Distinct from `ret.transport_error`,
+    # which is about the generator. Without it the two are indistinguishable at
+    # classification time and a verifier-side outage is filed against the rung
+    # that produced a perfectly good record.
+    verifier_transport: bool = False
 
     @property
     def reason_text(self) -> str:
@@ -84,7 +90,15 @@ class Verdict:
             # punish an honest signal and train the next model to overclaim,
             # which is the one thing this gate cannot detect.
             return "deferred"
-        if self.ret.transport_error:
+        if self.ret.transport_error or self.verifier_transport:
+            # Either end of the exchange failing to answer is a transport
+            # failure. When it is the verifier, the record itself was never
+            # judged, so counting it against the generator's rung would depress
+            # a pass rate over someone else's outage and climb the ladder for a
+            # reason that has nothing to do with capability — the thing
+            # AGENTS.md invariant 3 exists to forbid. `ModelVerifier` has said
+            # so in a comment since it was written; this is the field that lets
+            # it be true.
             return "transport"
         if self.ret.record is None:
             return "malformed"
@@ -293,6 +307,21 @@ THE RECORD:
 """
 
 
+class VerifierResult(typing.NamedTuple):
+    """What a verifier reports. A tuple so existing indexing still works.
+
+    `transport` is separate from `ok` because "the verifier did not answer" and
+    "the verifier rejected the record" are the same value of `ok` and must go to
+    different places.
+    """
+
+    ok: bool
+    reasons: list[str]
+    retryable: bool
+    tier: str | None = None
+    transport: bool = False
+
+
 class ModelVerifier:
     """A verifier rung. Refuses to share a family with the generator.
 
@@ -352,14 +381,15 @@ class ModelVerifier:
             # changes nothing — the ladder has no rung that may judge this, and
             # only a person can.
             if self.stage == JUDGMENT:
-                return False, [
+                return VerifierResult(False, [
                     f"no peer-or-stronger verifier outside the "
                     f"{BY_NAME[ret.work.tier].family!r} family exists for "
                     f"{ret.work.tier!r}. A weaker judge would pass exactly the "
                     f"errors this gate exists to catch (arXiv:2509.17995), so "
                     f"this needs a human."
-                ], False, None
-            return False, ["no cross-family verifier rung is available"], True, None
+                ], False, None)
+            return VerifierResult(False, ["no cross-family verifier rung is available"],
+                                  True, None)
 
         if self.stage == CHECKABLE:
             prompt = CHECKABLE_PROMPT + json.dumps(ret.record, indent=2)
@@ -374,21 +404,40 @@ class ModelVerifier:
         dispatcher = for_tier(tier, timeout=self.timeout, concurrency=1)
         results = dispatcher.run([(probe, prompt)])
         if not results:
-            return False, ["verifier returned nothing"], True, tier
+            # The dispatcher came back empty: the verifier never answered.
+            return VerifierResult(False, ["verifier returned nothing"], True, tier,
+                                  transport=True)
 
         reply = results[0]
+        if reply.inadmissible:
+            # The verifier surface answered, but not from a rung whose verdict
+            # may be counted — it routed into the generator's own family, or
+            # would not say what it routed to. Deliberately NOT transport: that
+            # would retry it clean against a deterministic condition, spend the
+            # surface's quota again for the same refusal, and then vanish into
+            # `unfinished` without ever reaching a person. Mirrors gate 3's
+            # refusal instead, which is the existing precedent for "nothing on
+            # this ladder may judge this, so a human must".
+            return VerifierResult(False, [f"verifier inadmissible: {reply.error}"],
+                                  False, tier)
         if reply.transport_error:
             # The verifier never answered. That says nothing about the record,
             # so it must not be recorded as a quality failure.
-            return False, [f"verifier transport failure: {reply.error}"], True, tier
+            return VerifierResult(False, [f"verifier transport failure: {reply.error}"],
+                                  True, tier, transport=True)
 
         verdict = reply.record or extract_json(reply.raw)
         if not isinstance(verdict, dict) or "ok" not in verdict:
-            return False, ["verifier did not return the verdict schema"], True, tier
+            # NOT marked transport: it answered, just not in the schema. That
+            # still says nothing about the record, so filing it against the
+            # generator is arguably wrong too — but it is a different argument
+            # from an outage and is left for a human to settle.
+            return VerifierResult(False, ["verifier did not return the verdict schema"],
+                                  True, tier)
         if verdict.get("ok"):
-            return True, [], False, tier
+            return VerifierResult(True, [], False, tier)
         reasons = verdict.get("reasons") or ["verifier rejected without a reason"]
-        return False, [str(r) for r in reasons][:6], True, tier
+        return VerifierResult(False, [str(r) for r in reasons][:6], True, tier)
 
 
 class NullVerifier:
@@ -400,11 +449,23 @@ class NullVerifier:
     def pick(self, generator_tier: str) -> str | None:
         return None
 
-    def __call__(self, ret: Return, **_) -> tuple[bool, list[str], bool, str | None]:
-        return True, [], False, None
+    def __call__(self, ret: Return, **_) -> "VerifierResult":
+        return VerifierResult(True, [], False, None)
 
 
 # --- the ladder of gates --------------------------------------------------
+
+def _as_result(value) -> VerifierResult:
+    """Accept a bare 4-tuple as well as a VerifierResult.
+
+    Verifiers are a small pluggable protocol and hand-written ones exist in
+    tests. A 4-tuple simply means "no transport signal", which is the safe
+    reading: it classifies as before rather than silently claiming an outage.
+    """
+    if isinstance(value, VerifierResult):
+        return value
+    return VerifierResult(*value)
+
 
 def run_gate(ret: Return, *, checkable=None, judgment=None,
              constraints: str = "", task: str = "",
@@ -426,14 +487,16 @@ def run_gate(ret: Return, *, checkable=None, judgment=None,
         return Verdict(ret, SCRIPT, False, errors, True)
 
     checkable = checkable or NullVerifier(CHECKABLE)
-    ok, reasons, retryable, tier = checkable(ret, constraints=constraints, task=task)
-    if not ok:
-        return Verdict(ret, CHECKABLE, False, reasons, retryable, tier)
+    outcome = _as_result(checkable(ret, constraints=constraints, task=task))
+    if not outcome.ok:
+        return Verdict(ret, CHECKABLE, False, outcome.reasons, outcome.retryable,
+                       outcome.tier, verifier_transport=outcome.transport)
 
     judgment = judgment or NullVerifier(JUDGMENT)
-    ok, reasons, retryable, tier = judgment(ret, constraints=constraints, task=task)
-    if not ok:
-        return Verdict(ret, JUDGMENT, False, reasons, retryable, tier)
+    outcome = _as_result(judgment(ret, constraints=constraints, task=task))
+    if not outcome.ok:
+        return Verdict(ret, JUDGMENT, False, outcome.reasons, outcome.retryable,
+                       outcome.tier, verifier_transport=outcome.transport)
 
     # Last, and only in the one admissible direction: a model that says it is
     # unsure gets escalated rather than believed. Checked AFTER the real gates
@@ -445,9 +508,9 @@ def run_gate(ret: Return, *, checkable=None, judgment=None,
                        [f"the agent reported confidence {stated:.2f}, below "
                         f"{LOW_CONFIDENCE}. Escalating rather than accepting a "
                         f"self-declared guess."],
-                       True, tier)
+                       True, outcome.tier)
 
-    return Verdict(ret, PASSED, True, [], False, tier)
+    return Verdict(ret, PASSED, True, [], False, outcome.tier)
 
 
 def escalate(verdicts: list[Verdict], run_id: str,

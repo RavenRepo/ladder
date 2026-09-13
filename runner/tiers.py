@@ -75,6 +75,15 @@ class Tier:
     rank: int            # 0 = strongest. Climb order, not quality proof.
     cost: Cost
     note: str = ""
+    # A rung that may VERIFY but may never be routed work. Set only where the
+    # surface cannot tell you in advance which model will answer: a pass rate
+    # measured on such a rung is not a pass rate for anything you can select
+    # again, so the policy has nothing to learn and would be recording outcomes
+    # against a name rather than a model. Pricing cannot express this — a rung
+    # priced above every sibling is still reachable by a launch that weights a
+    # currency differently, and pricing it high to prevent routing would be
+    # fudging a measurement to obtain a behaviour.
+    verifier_only: bool = False
 
 
 # --- the ladder, as measured on this machine ------------------------------
@@ -123,6 +132,47 @@ LADDER: tuple[Tier, ...] = (
     Tier("cli-haiku-4.5", "claude-cli", "claude-haiku-4-5-20251001", Lane.THICK, "claude", 4,
          Cost(0.0468, 22_810, 5.0),
          "Measured floor $0.0468 for one word: 100% harness, 0% answer."),
+
+    # --- thick lane · copilot · the only non-Claude rung that holds a repo --
+    # This rung exists for the gate, not for the savings. Without it
+    # `counter_family()` returns [] for every thick-lane tier, so gate 2 fails
+    # closed and gate 3 refuses — cross-family verification is impossible in
+    # the lane where the expensive work happens.
+    #
+    # There is one rung here and it is not a model, for two independent
+    # reasons. Copilot meters PREMIUM REQUESTS, one per call, flat across
+    # models, so down-routing inside this surface buys nothing. And the model
+    # cannot be selected at all: `--model` takes only "auto", and the router
+    # chooses per task. Declaring a rung per model would invent a choice this
+    # surface does not offer and file outcomes against rungs nobody picked.
+    #
+    # Rank 5 is deliberate pessimism. Gate 2 takes the WEAKEST counter-family
+    # rung, so this serves there; gate 3 needs peer-or-stronger and will never
+    # select it. A judge whose identity is decided per dispatch by someone
+    # else's router is not a judge you can stand behind, and gate 3 refusing is
+    # the documented correct answer when no admissible judge exists.
+    #
+    # `verifier_only` is what keeps it out of generation, and it has to be a
+    # flag rather than a price. At $0.04 this rung is CHEAPER than
+    # cli-haiku-4.5 ($0.0468) and carries fewer tokens than any claude-cli rung
+    # (15,690 vs 22,800+), so under both the usd and the tokens weighting it
+    # sorts first and the explore step routes real work onto it — measured at
+    # 52 of 300 dispatches from a cli-opus-4.5 floor. An earlier draft of this
+    # comment claimed the price prevented that. It did not; only the flag does.
+    #
+    # The usd figure is one request at GitHub's published overage rate, the
+    # marginal cost once the monthly allowance is gone. Inside the allowance it
+    # is nearer zero. It is recorded for the run record's arithmetic, not to
+    # influence routing, which is now impossible by construction.
+    Tier("copilot-auto", "copilot", "auto", Lane.THICK, "copilot", 5,
+         Cost(0.04, 15_690, 15.4),
+         "The model is 'auto' because that is the only value copilot's --model "
+         "accepts here: the router picks per task and told us 'gpt-5.6-luna' "
+         "for one prompt and 'mai-code-1.1-flash' for the next. The rung you "
+         "reach IS the router. Rank 5 keeps it off gate 3 for that reason. usd "
+         "is 1 premium request at GitHub's published overage rate, NOT measured "
+         "on this account; tokens_in and seconds are measured.",
+         verifier_only=True),
 )
 
 BY_NAME = {tier.name: tier for tier in LADDER}
@@ -146,7 +196,7 @@ def climb_order(lane_name: str, *, family: str | None = None,
     """
     weights = weights or {}
     rungs = [t for t in in_lane(lane_name)
-             if family is None or t.family == family]
+             if (family is None or t.family == family) and not t.verifier_only]
     return sorted(rungs, key=lambda t: (t.cost.objective(**weights), -t.rank))
 
 
@@ -159,7 +209,8 @@ def escalation_path(start: str, *, weights: dict | None = None) -> list[Tier]:
     coin flipped twice.
     """
     here = BY_NAME[start]
-    stronger = [t for t in in_lane(here.lane) if t.rank < here.rank]
+    stronger = [t for t in in_lane(here.lane)
+                if t.rank < here.rank and not t.verifier_only]
     weights = weights or {}
     return sorted(stronger, key=lambda t: (t.cost.objective(**weights), -t.rank))
 

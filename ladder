@@ -68,8 +68,16 @@ def cmd_tiers(args) -> int:
         print(f"\n{BOLD}{lane} lane{OFF}" if sys.stdout.isatty() else f"\n{lane} lane")
         print(f"  {'rung':<16} {'family':<7} {'rank':<5} {'usd':>8} "
               f"{'tok_in':>8} {'sec':>6}  surface")
-        for tier in tiers_mod.climb_order(lane, weights=weights):
+        # climb_order() is the ROUTABLE ladder and excludes verifier-only rungs.
+        # They are printed after it rather than hidden: a rung the gate depends
+        # on, whose surface the probe reports live, must not be invisible to the
+        # operator reading the ladder to work out what the gate will do.
+        routable = tiers_mod.climb_order(lane, weights=weights)
+        held_back = [t for t in tiers_mod.in_lane(lane) if t.verifier_only]
+        for tier in routable + held_back:
             state = "" if not live or tier.surface in live else _c("  (surface dead)", RED)
+            if tier.verifier_only:
+                state += _c("  (verifier only — never routed work)", DIM)
             print(f"  {tier.name:<16} {tier.family:<7} {tier.rank:<5} "
                   f"{tier.cost.usd:>8.4f} {tier.cost.tokens_in:>8,} "
                   f"{tier.cost.seconds:>6.2f}  {tier.surface}{state}")
@@ -298,7 +306,7 @@ def main() -> int:
     p = sub.add_parser("run", help="run a launch")
     p.add_argument("launch")
     p.add_argument("--dispatch", default="mock",
-                   choices=["mock", "auto", "kirocc", "claude-cli"],
+                   choices=["mock", "auto", "kirocc", "claude-cli", "copilot"],
                    help="mock (default, free) | auto (by tier) | a specific surface")
     p.add_argument("--gate", choices=["script", "checkable", "full"],
                    help="override the launch's gate level")

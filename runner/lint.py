@@ -23,6 +23,7 @@ import re
 
 from .gate import check_shape
 from .launch import Launch, list_launches
+from . import substrate
 from .tiers import BY_NAME, counter_family, escalation_path
 
 _JSONISH = re.compile(r"\{.*\}", re.DOTALL)
@@ -47,13 +48,59 @@ def lint(launch: Launch) -> list[str]:
                 "lower the floor.")
 
         # 3. If the gate will call a verifier, does a cross-family rung exist?
-        if launch.gate in ("checkable", "full"):
-            if not counter_family(launch.floor_tier):
+        #
+        # The two stages want different things and must be checked separately.
+        # While the thick lane held Claude rungs only, "is counter_family empty"
+        # happened to answer both questions at once. It stopped doing so the
+        # moment a mid-rank rung of another family was added: gate 2 is now
+        # satisfied there and gate 3 still is not, and a launch that passed this
+        # check would send every single return to a human while reporting clean.
+        # A launch is not checked at its floor alone. A quality retry escalates,
+        # so the rung generating the work at gate time is frequently a rung the
+        # floor merely leads to — and gate 3's judge has to be peer-or-stronger
+        # than THAT. Checking the floor only lints clean and then refuses on the
+        # first retry. Check #2 above already walks the same path.
+        generators = [BY_NAME[launch.floor_tier]]
+        if launch.max_attempts > 1:
+            generators += escalation_path(launch.floor_tier, weights=launch.weights)
+
+        # And a rung whose surface the probe found dead is not a verifier.
+        # `ModelVerifier.pick` filters by live surfaces; a check that does not
+        # is answering a different question from the one the run will ask.
+        # Without this the thick lane's whole gate hangs on one optional
+        # third-party binary and the cheapest check in the workspace is silent
+        # about it.
+        live = set(substrate.available())
+        for here in generators:
+            others = [t for t in counter_family(here.name)
+                      if not live or t.surface in live]
+            where = ("" if here.name == launch.floor_tier
+                     else f" (reached by escalation from {launch.floor_tier!r})")
+            if launch.gate in ("checkable", "full") and not others:
+                dead = [t.surface for t in counter_family(here.name)]
+                why = (f"the {launch.lane} lane has no rung outside "
+                       f"{here.family!r}" if not dead else
+                       f"every rung outside {here.family!r} is on a surface the "
+                       f"probe did not find live ({', '.join(sorted(set(dead)))})")
                 findings.append(
                     f"gate {launch.gate!r} needs a verifier of a different model "
-                    f"family, and the {launch.lane} lane has no rung outside "
-                    f"{BY_NAME[launch.floor_tier].family!r}. Every return would "
-                    "fail closed at gate 2.")
+                    f"family for {here.name!r}{where}, and {why}. Every return "
+                    "would fail closed at gate 2.")
+                continue
+            if launch.gate == "full" and others:
+                # Gate 3 refuses rather than falling back to a weaker judge, so
+                # a counter-family rung that is merely present is not enough: it
+                # has to be peer-or-stronger than the rung that generated it.
+                if not [t for t in others if t.rank <= here.rank]:
+                    strongest = min(others, key=lambda t: t.rank)
+                    findings.append(
+                        f"gate 'full' needs a judge of a different model family "
+                        f"at {here.name!r}{where}'s rank or better. The "
+                        f"{launch.lane} lane's strongest live rung outside "
+                        f"{here.family!r} is {strongest.name!r} (rank "
+                        f"{strongest.rank} vs {here.rank}), so gate 3 refuses "
+                        "and every return goes to the human queue. Lower the "
+                        "floor or use gate 'checkable'.")
 
     # 4. A stop condition made of counts, not adjectives.
     if launch.max_dispatches <= 0:

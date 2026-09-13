@@ -51,6 +51,22 @@ KIROCC_BASE = "http://127.0.0.1:3456"
 MEASURED_CONTEXT_WEIGHT = {
     "kirocc": 91,
     "claude-cli": 22_800,
+    # Measured 2026-09-13 the same way as the other two: one-word prompt,
+    # `--usage-output-file`. The figure is `cache_write`; the accompanying
+    # `input: 3` is the prompt itself and is deliberately NOT counted, because
+    # this number is the fixed harness dragged along BEFORE your task text and
+    # that is what makes it comparable across surfaces.
+    #
+    # Two observations, both with `--no-custom-instructions`: 15,690 from this
+    # repo and 15,510 from an empty directory. ~1% of drift remains after
+    # pinning the flag, so treat this as a measured figure with a band, not a
+    # constant — and re-measure rather than trust it if a routing decision ever
+    # turns on the difference.
+    #
+    # Copilot carries less harness than `claude -p` and is still two orders of
+    # magnitude above kirocc, so it is a thick-lane surface and nothing routed
+    # here is cheap.
+    "copilot": 15_690,
 }
 
 
@@ -153,6 +169,36 @@ def probe_kirocc(timeout: int = 30) -> Surface:
     return surface
 
 
+# One parser, used by both this module and the dispatcher. They were separate
+# copies whose companions disagreed — this one took the FIRST matching event and
+# the dispatcher's took the LAST — so the two files would have answered the same
+# question differently if a session ever re-resolved its model. It lives here
+# because dispatch.py already depends on substrate.py and not the reverse.
+def _jsonl(text: str) -> list[dict]:
+    """Parse a JSONL event stream. A truncated final line is skipped, not fatal."""
+    events = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _event(events: list[dict], kind: str) -> dict | None:
+    """Payload of the LAST event of `kind`. `result` is top-level, others nest."""
+    found = None
+    for event in events:
+        if event.get("type") == kind:
+            found = event.get("data") if "data" in event else event
+    return found
+
+
 def probe_claude_cli(timeout: int = 180) -> Surface:
     """Claude Code in print mode. The thick lane: tools, repo, filesystem.
 
@@ -202,6 +248,72 @@ def probe_claude_cli(timeout: int = 180) -> Surface:
     surface.available = True
     cost = envelope.get("total_cost_usd", 0.0)
     surface.detail = f"probe cost ${cost:.4f} (this is the harness tax, not the answer)"
+    return surface
+
+
+def probe_copilot(timeout: int = 180) -> Surface:
+    """GitHub Copilot CLI in print mode. The thick lane's only non-Claude rung.
+
+    Worth probing on every run rather than only weekly, because this is the
+    surface that decides whether thick-lane cross-family verification is
+    possible at all. With it dead, `counter_family()` returns [] for every
+    `claude-cli` rung and gate 2 fails closed.
+
+    `availableModels` is read from the router's own event rather than from a
+    catalog. On this machine the account advertised one model, not the two the
+    docs describe, and a tier built on the documented pair would have
+    dispatched into a wall.
+    """
+    surface = Surface(
+        name="copilot",
+        lane=Lane.THICK,
+        kind="cli",
+        models=[],                   # filled from the probe, never from a catalog
+        context_weight=MEASURED_CONTEXT_WEIGHT["copilot"],
+        checked=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    )
+    if shutil.which("copilot") is None:
+        surface.detail = "the `copilot` CLI is not on PATH"
+        return surface
+
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            ["copilot", "-p", "Say OK", "--model", "auto", "--allow-all-tools",
+             "--no-color", "--log-level", "none", "--output-format", "json",
+             # Same reason as the dispatcher: without this the weight measured
+             # here is a property of the directory the probe happened to run in.
+             "--no-custom-instructions"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        surface.detail = f"no answer within {timeout}s"
+        return surface
+    except OSError as exc:
+        surface.detail = f"{type(exc).__name__}: {exc}"
+        return surface
+
+    surface.latency_ms = int((time.monotonic() - started) * 1000)
+    # Copilot answers in JSONL and reports its own failures as events, so the
+    # exit code is not the signal and neither is a substring search over the
+    # blob: the MCP server instructions and the agent's own answer both land on
+    # stdout, and scanning them for "429" files a correct answer as an outage.
+    events = _jsonl(proc.stdout)
+    resolved = _event(events, "session.auto_mode_resolved")
+    result = _event(events, "result")
+    if resolved:
+        surface.models = list(resolved.get("availableModels") or [])
+    if result is None:
+        surface.detail = "no result event in the reply"
+        return surface
+    if result.get("exitCode", 1) != 0:
+        surface.detail = f"exited {result.get('exitCode')}"
+        return surface
+
+    surface.available = True
+    premium = (result.get("usage") or {}).get("premiumRequests", 0)
+    surface.detail = (f"{len(surface.models)} model(s), probe cost {premium} "
+                      f"premium request(s) for one word")
     return surface
 
 
@@ -269,7 +381,8 @@ def probe_all(include_dead: bool = True, timeout: int = 30) -> list[Surface]:
     property, and the probe is the only thing that will notice when a card
     gets paid.
     """
-    surfaces = [probe_kirocc(timeout=timeout), probe_claude_cli()]
+    surfaces = [probe_kirocc(timeout=timeout), probe_claude_cli(),
+                probe_copilot()]
     if include_dead:
         surfaces += [
             probe_cli("opencode", ["opencode", "run", "-m",
