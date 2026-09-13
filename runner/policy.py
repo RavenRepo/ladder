@@ -20,9 +20,19 @@ deliberately unclever:
   - start PESSIMISTIC. A new capability runs at the tier its author declared.
     Never at the cheapest rung — an unproven capability failing on a cheap rung
     teaches you nothing about the capability, only about the rung.
-  - EXPLORE downward on a small fraction of dispatches. One rung cheaper, same
-    gate, result recorded. This is the only way evidence for a cheaper rung can
-    ever exist, because a rung you never route to is a rung you never learn.
+  - EXPLORE downward on a small fraction of dispatches, aimed at the CHEAPEST
+    rung that has not yet been decided — not at the next rung down. This is the
+    only way evidence for a cheaper rung can ever exist, because a rung you
+    never route to is a rung you never learn.
+
+    Aiming at the cheapest undecided rung rather than the adjacent one is not a
+    detail; it is the difference between converging and not. Walking down one
+    rung at a time costs MIN_SAMPLES trials *per rung*, so with seven rungs and
+    a 15% explore rate a capability needs roughly 560 dispatches before it can
+    reach the bottom. Aiming at the bottom directly costs MIN_SAMPLES total in
+    the good case, and in the bad case the failure is recorded and the next
+    attempt aims one rung higher. The first version of this file got it wrong
+    and the learning test is what caught it.
   - PROMOTE the cheaper rung to current once it has enough trials above the
     bar.
   - DEMOTE back up if the current rung falls below the bar minus a hysteresis
@@ -89,7 +99,7 @@ class Outcome:
         return cls(**{k: v for k, v in row.items() if k in known})
 
 
-def record(outcome: Outcome, path: pathlib.Path = OUTCOMES) -> None:
+def record(outcome: Outcome, path: pathlib.Path | None = None) -> None:
     """Append one outcome. Append-only, because this file is the audit trail.
 
     Anything that spends a dispatch must land here — including malformed
@@ -97,6 +107,7 @@ def record(outcome: Outcome, path: pathlib.Path = OUTCOMES) -> None:
     invisible. A run record that shows a clean stop while dispatches went
     unaccounted for is worse than no record.
     """
+    path = path or OUTCOMES
     if not outcome.stamp:
         outcome.stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +115,12 @@ def record(outcome: Outcome, path: pathlib.Path = OUTCOMES) -> None:
         handle.write(json.dumps(dataclasses.asdict(outcome), sort_keys=True) + "\n")
 
 
-def load(path: pathlib.Path = OUTCOMES) -> list[Outcome]:
+def load(path: pathlib.Path | None = None) -> list[Outcome]:
+    # Resolved at call time, not bound at definition time: a module-level
+    # default freezes the path when the module is imported, so a caller that
+    # redirects OUTCOMES (a test, a scratch run, a second workspace) silently
+    # reads one file while writing another. That bug cost an afternoon.
+    path = path or OUTCOMES
     if not path.exists():
         return []
     outcomes = []
@@ -178,7 +194,8 @@ def choose(capability: str, *, lane: str, floor_tier: str,
            outcomes: list[Outcome] | None = None,
            weights: dict | None = None,
            rng: random.Random | None = None,
-           available: set[str] | None = None) -> Decision:
+           available: set[str] | None = None,
+           explore: bool = True) -> Decision:
     """Pick the rung to dispatch this capability on.
 
     `floor_tier` is the author's declared starting point and the policy's
@@ -189,6 +206,12 @@ def choose(capability: str, *, lane: str, floor_tier: str,
     `available` is the set of surfaces the probe found alive. A rung whose
     surface is dead is skipped rather than dispatched into — that is the whole
     reason substrate health is an artifact and not an assumption.
+
+    `explore=False` for capabilities whose `risk_class` is `irreversible`.
+    The policy may never trial a cheaper rung on work that cannot be taken
+    back: exploration is a controlled experiment, and an experiment you cannot
+    undo is not controlled. Such a capability runs at `floor_tier` or above,
+    always, and gets cheaper only when a human moves its floor.
     """
     rng = rng or random.Random()
     stats = tally(outcomes if outcomes is not None else load())
@@ -212,15 +235,16 @@ def choose(capability: str, *, lane: str, floor_tier: str,
                 f"(below {DEMOTE_BELOW:.0%}); climbing",
             )
 
-    # Explore one rung cheaper, sometimes. This is the only source of evidence
-    # for a rung the policy is not already using.
-    cheaper = _next_cheaper(current, rungs)
-    if cheaper and rng.random() < EXPLORE_RATE:
-        trial = stats.get((capability, cheaper.name), Stats())
-        if not trial.decided or trial.rate >= PROMOTE_AT:
+    # Explore downward, sometimes. This is the only source of evidence for a
+    # rung the policy is not already using.
+    if explore and rng.random() < EXPLORE_RATE:
+        target = _explore_target(capability, current, stats, rungs)
+        if target:
+            trial = stats.get((capability, target.name), Stats())
             return Decision(
-                cheaper.name,
-                f"exploring one rung cheaper ({trial.trials}/{MIN_SAMPLES} trials so far)",
+                target.name,
+                f"exploring cheaper rung {target.name} "
+                f"({trial.trials}/{MIN_SAMPLES} trials so far)",
                 exploring=True,
             )
 
@@ -243,12 +267,24 @@ def _settled_tier(capability: str, floor_tier: str,
     return floor_tier
 
 
-def _next_cheaper(current: str, rungs: list):
+def _explore_target(capability: str, current: str,
+                    stats: dict[tuple[str, str], Stats], rungs: list):
+    """The cheapest rung below `current` that has not been decided against.
+
+    Cheapest-first, not adjacent-first — see the module docstring for why that
+    is the difference between converging and not. A rung already decided below
+    the promotion bar is skipped: it has had its trials and it failed them, and
+    re-trialling it is how a policy spends a budget re-learning the same thing.
+    """
     names = [t.name for t in rungs]
     if current not in names:
         return None
-    index = names.index(current)
-    return None if index == 0 else rungs[index - 1]
+    for tier in rungs[:names.index(current)]:
+        cell = stats.get((capability, tier.name))
+        if cell and cell.decided and cell.rate < PROMOTE_AT:
+            continue                      # tried, failed, do not re-litigate
+        return tier
+    return None
 
 
 def _why_current(capability: str, tier: str, floor_tier: str,

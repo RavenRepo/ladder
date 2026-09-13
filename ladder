@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""ladder — run capabilities across model tiers, cheapest rung that holds up.
+
+Every command that can spend money says so before it does, and the default
+dispatcher is the mock, which spends nothing. Run `ladder run --dispatch mock`
+before any real run: a broken launch caught by fake agents costs nothing and a
+broken launch caught by real ones costs whatever real ones cost.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from runner import policy as policy_mod           # noqa: E402
+from runner import substrate as substrate_mod     # noqa: E402
+from runner import tiers as tiers_mod             # noqa: E402
+from runner.launch import Launch, load_launch, list_launches  # noqa: E402
+from runner.lint import lint, lint_all                        # noqa: E402
+from runner.run import Stop, execute              # noqa: E402
+
+GREEN, RED, DIM, BOLD, OFF = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
+
+
+def _c(text: str, colour: str) -> str:
+    return f"{colour}{text}{OFF}" if sys.stdout.isatty() else text
+
+
+# --- probe ----------------------------------------------------------------
+
+def cmd_probe(args) -> int:
+    """Measure what is reachable. A catalog is a claim; this is the capability."""
+    surfaces = substrate_mod.probe_all(include_dead=not args.fast)
+    substrate_mod.write_health(surfaces)
+
+    print(f"{BOLD}surface        lane   status     latency  detail{OFF}"
+          if sys.stdout.isatty() else
+          "surface        lane   status     latency  detail")
+    for surface in surfaces:
+        mark = _c("live", GREEN) if surface.available else _c("dead", RED)
+        latency = f"{surface.latency_ms}ms" if surface.latency_ms else "-"
+        print(f"{surface.name:<14} {surface.lane:<6} {mark:<18} {latency:>7}  "
+              f"{surface.detail}")
+
+    alive = [s for s in surfaces if s.available]
+    print()
+    if not alive:
+        print(_c("nothing is reachable. No run can be dispatched.", RED))
+        return 1
+    print(f"{len(alive)}/{len(surfaces)} surfaces live. "
+          f"Health written to 20-graph/substrate.json")
+    return 0
+
+
+# --- ladder ---------------------------------------------------------------
+
+def cmd_tiers(args) -> int:
+    """Print the ladder as the policy sees it, under the weights you pass."""
+    weights = _weights(args)
+    live = set(substrate_mod.available())
+    for lane in ("thin", "thick"):
+        print(f"\n{BOLD}{lane} lane{OFF}" if sys.stdout.isatty() else f"\n{lane} lane")
+        print(f"  {'rung':<16} {'family':<7} {'rank':<5} {'usd':>8} "
+              f"{'tok_in':>8} {'sec':>6}  surface")
+        for tier in tiers_mod.climb_order(lane, weights=weights):
+            state = "" if not live or tier.surface in live else _c("  (surface dead)", RED)
+            print(f"  {tier.name:<16} {tier.family:<7} {tier.rank:<5} "
+                  f"{tier.cost.usd:>8.4f} {tier.cost.tokens_in:>8,} "
+                  f"{tier.cost.seconds:>6.2f}  {tier.surface}{state}")
+    print(f"\n{DIM}cheapest first under the weights given. "
+          f"Escalation climbs strictly in capability.{OFF}"
+          if sys.stdout.isatty() else "")
+    return 0
+
+
+# --- policy ---------------------------------------------------------------
+
+def cmd_policy(args) -> int:
+    """What the system currently believes about each capability."""
+    rows = policy_mod.report()
+    if not rows:
+        print("no outcomes recorded yet. Run something first.")
+        return 0
+    for row in rows:
+        print(f"\n{BOLD}{row['capability']}{OFF}" if sys.stdout.isatty()
+              else f"\n{row['capability']}")
+        for cell in row["tiers"]:
+            bar = "decided" if cell["decided"] else \
+                  f"{cell['trials']}/{policy_mod.MIN_SAMPLES}"
+            verdict = ""
+            if cell["decided"]:
+                verdict = (_c("above bar", GREEN) if cell["rate"] >= policy_mod.PROMOTE_AT
+                           else _c("below bar", RED))
+            transport = f"  ({cell['transport']} transport, excluded)" if cell["transport"] else ""
+            print(f"  {cell['tier']:<16} {cell['rate']:>6.0%} over "
+                  f"{cell['trials']:>3} trials  {bar:<9} {verdict}{transport}")
+        if row["split"]:
+            print(_c(f"  ! {row['split']['finding']}", RED))
+    return 0
+
+
+# --- launches -------------------------------------------------------------
+
+def cmd_launches(args) -> int:
+    launches = list_launches()
+    if not launches:
+        print("no launches in 00-launches/. See templates/launch.md")
+        return 0
+    for launch in launches:
+        print(f"{launch.name:<24} {launch.capability:<22} "
+              f"lane={launch.lane:<6} floor={launch.floor_tier:<14} "
+              f"{len(launch.instances)} instances")
+    return 0
+
+
+def cmd_lint(args) -> int:
+    """Check launches against the gate that will actually judge their output.
+
+    The cheapest check here. Run it after editing any launch: a launch that
+    asks for evidence its own gate rejects costs a whole run to discover.
+    """
+    results = {args.launch: lint(load_launch(args.launch))} if args.launch else lint_all()
+    if not results:
+        print("no launches to lint.")
+        return 0
+    bad = 0
+    for name, findings in results.items():
+        if not findings:
+            print(f"{_c('ok  ', GREEN)} {name}")
+            continue
+        bad += 1
+        print(f"{_c('warn', RED)} {name}")
+        for finding in findings:
+            print(f"       - {finding}")
+    return 1 if bad else 0
+
+
+def cmd_plan(args) -> int:
+    """What a run would dispatch, without dispatching it. Spends nothing."""
+    launch = load_launch(args.launch)
+    live = set(substrate_mod.available()) or None
+    outcomes = policy_mod.load()
+    import random
+    rng = random.Random(0)
+    print(f"{launch.name}: {launch.capability} · {len(launch.instances)} instances")
+    print(f"lane={launch.lane} floor={launch.floor_tier} "
+          f"risk={launch.risk_class} gate={launch.gate}")
+    if launch.risk_class == "irreversible":
+        print(_c("exploration disabled: irreversible work never trials a cheaper rung.",
+                 DIM if sys.stdout.isatty() else ""))
+    decision = policy_mod.choose(
+        launch.capability, lane=launch.lane, floor_tier=launch.floor_tier,
+        outcomes=outcomes, weights=launch.weights, rng=rng, available=live,
+        explore=launch.risk_class != "irreversible")
+    print(f"\nwould dispatch at: {BOLD}{decision.tier}{OFF} — {decision.why}"
+          if sys.stdout.isatty() else
+          f"\nwould dispatch at: {decision.tier} — {decision.why}")
+    upward = tiers_mod.escalation_path(decision.tier, weights=launch.weights)
+    print(f"escalation path:   {' -> '.join(t.name for t in upward) or '(top of ladder)'}")
+    if launch.gate in ("checkable", "full"):
+        from runner.gate import CHECKABLE, JUDGMENT, ModelVerifier
+        print(f"gate 2 verifier:   {ModelVerifier(CHECKABLE, available=live).pick(decision.tier)}")
+        if launch.gate == "full":
+            print(f"gate 3 verifier:   {ModelVerifier(JUDGMENT, available=live).pick(decision.tier)}")
+    return 0
+
+
+def cmd_run(args) -> int:
+    launch = load_launch(args.launch)
+    dispatcher = args.dispatch
+    if dispatcher != "mock":
+        live = set(substrate_mod.available())
+        if not live:
+            print(_c("no live surface. Run `ladder probe` first.", RED))
+            return 1
+    kwargs = {}
+    if dispatcher == "mock":
+        kwargs = {"seed": args.seed or 0, "defect_rate": 0.25}
+    result = execute(
+        name=launch.name, capability=launch.capability, lane=launch.lane,
+        floor_tier=launch.floor_tier,
+        instances=launch.instances[:args.cap] if args.cap else launch.instances,
+        prompt_for=launch.prompt_for,
+        skill=_read("SKILL.md"), constraints=_read("CONSTRAINTS.md"),
+        schema_block=launch.return_schema,
+        stop=Stop(max_dispatches=args.cap or launch.max_dispatches,
+                  max_seconds=launch.max_seconds,
+                  max_attempts=launch.max_attempts),
+        dispatcher_name=None if dispatcher == "auto" else dispatcher,
+        gate_level=args.gate or launch.gate,
+        weights=launch.weights, seed=args.seed,
+        dispatcher_kwargs=kwargs,
+        task_description=launch.question,
+    )
+    print(f"\n{result.run_id}")
+    print(f"  dispatched {result.dispatched} · passed {result.passed} · "
+          f"quality-failed {result.quality_failed} · malformed {result.malformed} · "
+          f"transport {result.transport_failed}")
+    print(f"  explored cheaper {result.explored} · escalated to human {result.escalated}")
+    print(f"  cost ${result.cost_usd:.4f} · {result.tokens_in:,} input tokens · "
+          f"{result.seconds:.1f}s")
+    print(f"  stopped: {result.stopped_because}")
+    print(f"  record: 40-runs/{result.run_id}.md")
+    return 0
+
+
+def cmd_review(args) -> int:
+    """Assemble the weekly meta-review prompt. It proposes a diff; you apply it."""
+    import datetime as dt
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=args.days)
+    records = sorted((ROOT / "40-runs").glob("*.md"))
+    recent = [p for p in records
+              if dt.datetime.fromtimestamp(p.stat().st_mtime, dt.timezone.utc) >= cutoff]
+    template = _read("templates/meta-review.md")
+    body = [template, "\n---\n\n# RUN RECORDS\n"]
+    for path in recent:
+        body.append(f"\n## {path.name}\n\n```\n{path.read_text()}\n```\n")
+    body.append("\n# CURRENT POLICY STATE\n\n```json\n"
+                + json.dumps(policy_mod.report(), indent=2) + "\n```\n")
+    out = pathlib.Path(args.out) if args.out else ROOT / "40-runs" / "meta-review-prompt.md"
+    out.write_text("".join(body))
+    print(f"{len(recent)} run records over {args.days} days -> {out}")
+    print("Feed it to a fresh-context agent. It returns a DIFF. You apply it.")
+    return 0
+
+
+def _read(relative: str) -> str:
+    path = ROOT / relative
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _weights(args) -> dict:
+    return {"w_usd": args.w_usd, "w_tokens": args.w_tokens, "w_seconds": args.w_seconds}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="ladder", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("probe", help="measure which surfaces are reachable")
+    p.add_argument("--fast", action="store_true",
+                   help="skip the surfaces that were dead last time")
+    p.set_defaults(fn=cmd_probe)
+
+    p = sub.add_parser("tiers", help="print the ladder under given cost weights")
+    p.add_argument("--w-usd", type=float, default=1.0)
+    p.add_argument("--w-tokens", type=float, default=0.0)
+    p.add_argument("--w-seconds", type=float, default=0.0)
+    p.set_defaults(fn=cmd_tiers)
+
+    sub.add_parser("policy", help="what the system believes about each capability"
+                   ).set_defaults(fn=cmd_policy)
+    sub.add_parser("launches", help="list launches").set_defaults(fn=cmd_launches)
+
+    p = sub.add_parser("lint", help="check launches against the gate (cheapest check)")
+    p.add_argument("launch", nargs="?")
+    p.set_defaults(fn=cmd_lint)
+
+    p = sub.add_parser("plan", help="what a run would dispatch, without dispatching")
+    p.add_argument("launch")
+    p.set_defaults(fn=cmd_plan)
+
+    p = sub.add_parser("run", help="run a launch")
+    p.add_argument("launch")
+    p.add_argument("--dispatch", default="mock",
+                   choices=["mock", "auto", "kirocc", "claude-cli"],
+                   help="mock (default, free) | auto (by tier) | a specific surface")
+    p.add_argument("--gate", choices=["script", "checkable", "full"],
+                   help="override the launch's gate level")
+    p.add_argument("--cap", type=int, help="hard cap on dispatches")
+    p.add_argument("--seed", type=int)
+    p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("review", help="build the weekly meta-review prompt")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--out")
+    p.set_defaults(fn=cmd_review)
+
+    args = parser.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

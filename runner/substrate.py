@@ -263,11 +263,13 @@ def _cheapest_known(models: list[str]) -> str:
 def probe_all(include_dead: bool = True, timeout: int = 30) -> list[Surface]:
     """Probe every surface this workspace knows how to dispatch to.
 
-    `include_dead` probes the ones that were refusing on this machine. Skip it
-    for a fast check; run it weekly, because "dead" is a credential state, not
-    a property.
+    The two surfaces that work are always probed. `include_dead` adds the ones
+    that were refusing on this machine — skip them for a fast check, but run
+    the full probe weekly, because "dead" is a credential state, not a
+    property, and the probe is the only thing that will notice when a card
+    gets paid.
     """
-    surfaces = [probe_kirocc(timeout=timeout)]
+    surfaces = [probe_kirocc(timeout=timeout), probe_claude_cli()]
     if include_dead:
         surfaces += [
             probe_cli("opencode", ["opencode", "run", "-m",

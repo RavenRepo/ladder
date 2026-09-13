@@ -1,5 +1,5 @@
 {
-  "checked": "2026-09-13T12:45:13+00:00",
+  "checked": "2026-09-13T12:58:56+00:00",
   "surfaces": [
     {
       "name": "kirocc",
@@ -31,9 +31,24 @@
       ],
       "context_weight": 91,
       "available": true,
-      "latency_ms": 1322,
+      "latency_ms": 781,
       "detail": "22 models, probed claude-haiku-4.5",
-      "checked": "2026-09-13T12:45:12+00:00"
+      "checked": "2026-09-13T12:58:50+00:00"
+    },
+    {
+      "name": "claude-cli",
+      "lane": "thick",
+      "kind": "cli",
+      "models": [
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "context_weight": 22800,
+      "available": true,
+      "latency_ms": 4282,
+      "detail": "probe cost $0.0240 (this is the harness tax, not the answer)",
+      "checked": "2026-09-13T12:58:51+00:00"
     }
   ]
 }
