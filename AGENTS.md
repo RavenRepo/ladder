@@ -7,8 +7,23 @@ it, you want `SKILL.md` — it is loaded into your prompt already.
 
 A workspace that runs recurring work on the cheapest model tier that still
 passes an external gate, and learns which tier that is from recorded gate
-verdicts. `docs/principles.md` is the reasoning; read it before changing
-anything in `runner/`.
+verdicts.
+
+**Orient yourself in this order.** Don't skip to the code; the vocabulary is
+specific and guessing at it produces confidently wrong edits.
+
+1. [docs/GLOSSARY.md](docs/GLOSSARY.md) — *surface, lane, rung, capability,
+   deferred* all mean particular things. 4 minutes.
+2. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the flowchart, the module
+   map, which module owns which decision, and how to extend each part.
+3. [docs/principles.md](docs/principles.md) — why. Read this before changing
+   anything in `runner/gate.py` or `runner/policy.py`; most of what looks like
+   an arbitrary choice there is load-bearing and cited.
+4. `tests/test_pipeline.py` — **every test docstring names the defect it
+   prevents.** This is the fastest route to understanding the constraints.
+
+If you are an agent *dispatched by* this system rather than working on it, you
+want `SKILL.md` instead — and it's already in your prompt.
 
 ## Commands
 

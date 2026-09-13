@@ -585,5 +585,32 @@ class TestDeferralReachesTheHumanQueueAtTheTop(unittest.TestCase):
             self.assertIn("confidence", redirected.read_text())
 
 
+class TestLaneAwareAvailability(unittest.TestCase):
+    """A live surface somewhere is not a live surface in YOUR lane.
+
+    Checking only "is anything up" dispatches a thin-lane launch into a dead
+    proxy and files every 502 as a transport failure — a whole sweep spent
+    rediscovering what the probe already recorded.
+    """
+
+    def test_choose_refuses_when_the_lane_has_no_live_surface(self):
+        decision = choose("c", lane="thin", floor_tier="sonnet-5", outcomes=[],
+                          rng=random.Random(0), available={"claude-cli"})
+        self.assertIn("no rung", decision.why)
+
+    def test_a_lane_with_a_live_surface_still_selects(self):
+        decision = choose("c", lane="thick", floor_tier="cli-sonnet-4.5",
+                          outcomes=[], rng=random.Random(0),
+                          available={"claude-cli"})
+        self.assertEqual(tiers.BY_NAME[decision.tier].surface, "claude-cli")
+
+    def test_lanes_do_not_share_surfaces(self):
+        """If they ever did, the check above would silently stop meaning
+        anything."""
+        thin = {t.surface for t in tiers.in_lane("thin")}
+        thick = {t.surface for t in tiers.in_lane("thick")}
+        self.assertEqual(thin & thick, set())
+
+
 if __name__ == "__main__":
     unittest.main()

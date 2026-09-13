@@ -176,7 +176,19 @@ def cmd_run(args) -> int:
     if dispatcher != "mock":
         live = set(substrate_mod.available())
         if not live:
-            print(_c("no live surface. Run `ladder probe` first.", RED))
+            print(_c("no live surface at all. Run `ladder probe` first.", RED))
+            return 1
+        # A live surface somewhere is not the same as a live surface in THIS
+        # launch's lane. Checking only the former dispatches a thin-lane launch
+        # into a dead proxy and files every 502 as a transport failure — a
+        # whole sweep spent discovering something the probe already knew.
+        in_lane = [t for t in tiers_mod.in_lane(launch.lane) if t.surface in live]
+        if not in_lane:
+            dead = sorted({t.surface for t in tiers_mod.in_lane(launch.lane)})
+            print(_c(f"no live surface in the {launch.lane!r} lane "
+                     f"(needs one of: {', '.join(dead)}).", RED))
+            print("Run `ladder probe` to recheck, or `--dispatch mock` to "
+                  "exercise the pipeline for free.")
             return 1
     kwargs = {}
     if dispatcher == "mock":

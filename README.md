@@ -3,8 +3,29 @@
 Run recurring work on the cheapest model that still passes an external gate,
 and let the run history — not a guess — decide which model that is.
 
-`docs/principles.md` is why it is built this way, with the measurements and the
-citations. This file is how to use it.
+---
+
+## Start here
+
+**New to this? Don't read this file yet.** It's a reference. Start with the
+walkthrough — every command in it is free.
+
+| If you are… | Read this | Time |
+|---|---|---|
+| **new here (human or agent)** | **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — guided first hour, costs nothing | 20 min |
+| confused by a word | [docs/GLOSSARY.md](docs/GLOSSARY.md) — *rung, lane, capability, deferred* | 4 min |
+| wiring the pieces together | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — data flow, module map, how to extend | 10 min |
+| asking *why is it like this* | [docs/principles.md](docs/principles.md) — the measurements and 37 citations | 25 min |
+| changing the code | [AGENTS.md](AGENTS.md) — conventions and invariants | 5 min |
+| changing the rules | [SCHEMA.md](SCHEMA.md) — the contract | 10 min |
+| looking up a command | this file, below | — |
+
+**The 60-second version:** you have work that repeats. Some of it a cheap model
+handles fine; some needs the expensive one. Nobody knows which. This runs each
+kind of work at a model you declare, occasionally tries a cheaper one, checks
+every result with something *outside* the model that produced it, and keeps
+score. Proven cheap rungs become the default. Degraded ones climb back up. And
+nothing is ever promoted because a model said it felt confident.
 
 ---
 
