@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.omc/
+10-returns/*/
+!10-returns/README.md
