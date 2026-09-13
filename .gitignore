@@ -10,6 +10,7 @@ __pycache__/
 20-graph/outcomes.jsonl
 20-graph/substrate.json
 40-runs/*.md
+!40-runs/README.md
 
 # Shared: the system appends, a human writes decisions under the entries.
 # Untracked because it is local operational state, not part of the workspace.
