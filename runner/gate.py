@@ -39,6 +39,21 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 NEEDS_HUMAN = ROOT / "30-queries" / "needs-human.md"
 
 SCRIPT, CHECKABLE, JUDGMENT, PASSED = "script", "checkable", "judgment", "pass"
+DEFERRED = "deferred"
+
+# The ONE use of a model's self-reported confidence that the evidence licenses.
+#
+# Verbalized confidence is badly calibrated — around 0.10 ECE at best for 70B+
+# models, worse below that, and dominated by how the question was phrased
+# (arXiv:2412.14737) — and the bias runs toward OVERCONFIDENCE
+# (arXiv:2604.01457). So it is usable only asymmetrically:
+#
+#   low confidence  -> escalate.  A model saying "I am unsure" is cheap, rare,
+#                      and the one direction its bias does not manufacture.
+#   high confidence -> NOTHING.   Never a pass, never a tiebreak, never a
+#                      threshold. Overconfidence is the failure mode, so the
+#                      confident direction carries no information.
+LOW_CONFIDENCE = 0.5
 
 
 @dataclasses.dataclass
@@ -63,6 +78,12 @@ class Verdict:
         """
         if self.ok:
             return "pass"
+        if self.stage == DEFERRED:
+            # The model flagged its own uncertainty and we took it seriously.
+            # This is NOT a quality failure: counting it against the rung would
+            # punish an honest signal and train the next model to overclaim,
+            # which is the one thing this gate cannot detect.
+            return "deferred"
         if self.ret.transport_error:
             return "transport"
         if self.ret.record is None:
@@ -150,6 +171,8 @@ def check_shape(record: dict, source_text: str | None = None) -> list[str]:
                     f"the source text: {evidence[:60]!r}"
                 )
 
+    errors += check_no_fake_completion(record)
+
     confidence = record.get("confidence")
     if confidence is not None:
         # Carried for the human queue to read. Nothing automated may branch on
@@ -157,6 +180,65 @@ def check_shape(record: dict, source_text: str | None = None) -> list[str]:
         # emitting 1.7 is telling you something about its grip on the schema.
         if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
             errors.append(f"confidence must be between 0 and 1, got {confidence!r}")
+    return errors
+
+
+# --- gate 1b · the cheat markers, checked for free -------------------------
+#
+# Frontier models cheat on multi-file repository tasks at measured rates around
+# 49-54% (arXiv:2510.20270), and the useful part of that finding is that most
+# of the exploits are SYNTACTICALLY VISIBLE: a stub that returns the literal a
+# test expects, a `test.skip` added beside the code it was meant to cover, a
+# TODO standing in for the branch that was the actual task.
+#
+# Visible means a regex finds them, which means they never need to reach a
+# model at all. Everything below runs at gate 1, for nothing, before a verifier
+# token is spent — and it is the same rule as "no fake completion": a
+# placeholder is a blocker, not evidence.
+
+_CHEAT_MARKERS = (
+    (re.compile(r"\btest\s*\.\s*(skip|only)\b", re.I),
+     "a skipped or exclusive test"),
+    (re.compile(r"\b(TODO|FIXME|XXX|HACK)\b"),
+     "a placeholder marker"),
+    (re.compile(r"\bNotImplementedError\b"),
+     "an unimplemented branch"),
+    (re.compile(r"\braise\s+NotImplemented\b"),
+     "an unimplemented branch"),
+    (re.compile(r"\b(stub|placeholder|dummy)\s+(implementation|function|value)\b", re.I),
+     "a self-described stub"),
+    (re.compile(r"\b(for\s+now|left\s+as\s+an\s+exercise|will\s+implement\s+later)\b", re.I),
+     "deferred work described as done"),
+)
+
+
+def check_no_fake_completion(record: dict, artifact_text: str | None = None) -> list[str]:
+    """Reject work that reports completion while containing its own placeholder.
+
+    Scans the record's own claims, and any artifact text the caller supplies
+    (a diff, a file body). This is deliberately a blunt instrument: a claim
+    whose text says TODO is either describing a placeholder it left behind, or
+    describing one it found — and the second case belongs in the statement,
+    not the evidence, so the cost of the false positive is one clarifying
+    rewrite.
+    """
+    errors: list[str] = []
+    haystacks = []
+    for index, claim in enumerate(record.get("claims") or []):
+        if isinstance(claim, dict):
+            haystacks.append((f"claims[{index}]", str(claim.get("statement", ""))))
+    if artifact_text:
+        haystacks.append(("artifact", artifact_text))
+
+    for where, text in haystacks:
+        for pattern, what in _CHEAT_MARKERS:
+            match = pattern.search(text)
+            if match:
+                errors.append(
+                    f"{where} reports completion but contains {what} "
+                    f"({match.group(0)!r}). A placeholder is a blocker, not "
+                    f"evidence — implement it or report it as unfinished.")
+                break            # one finding per haystack is enough to reject
     return errors
 
 
@@ -239,17 +321,44 @@ class ModelVerifier:
             return None
         if self.stage == CHECKABLE:
             return max(candidates, key=lambda t: t.rank).name
+
         here = BY_NAME[generator_tier]
         strong = [t for t in candidates if t.rank <= here.rank]
-        return (strong[0] if strong else candidates[0]).name
+        # No peer-or-stronger rung of the other family: gate 3 REFUSES rather
+        # than falling back to a weaker one.
+        #
+        # An earlier version returned the strongest available candidate here,
+        # which put a weak verifier on a strong generator's judgment — the
+        # worst configuration there is. Verification skill tracks the verifier's
+        # own generation ability, and errors produced by a *stronger* generator
+        # are the hardest to detect, because they are internally consistent and
+        # wrong (arXiv:2509.17995). A model is also a worse verifier than solver
+        # of the same problem (arXiv:2502.14948). So a weaker judge does not
+        # give you a weaker gate; it gives you a gate that passes precisely the
+        # errors it was installed to catch, while reporting success.
+        #
+        # Returning None routes the record to the human queue instead. That is
+        # the correct answer: when the strongest rung you have produces work,
+        # nothing you own can judge it, and a person has to.
+        return strong[0].name if strong else None
 
     def __call__(self, ret: Return, *, constraints: str = "",
                  task: str = "") -> tuple[bool, list[str], bool, str | None]:
         tier = self.pick(ret.work.tier)
         if tier is None:
-            # No cross-family rung is reachable. Refusing to verify is the safe
-            # direction: passing the record because no verifier was available
-            # would mark it verified on the strength of an outage.
+            # No admissible verifier. Refusing is the safe direction: passing a
+            # record because no verifier was available would mark it verified on
+            # the strength of an outage. `retryable=False` because retrying
+            # changes nothing — the ladder has no rung that may judge this, and
+            # only a person can.
+            if self.stage == JUDGMENT:
+                return False, [
+                    f"no peer-or-stronger verifier outside the "
+                    f"{BY_NAME[ret.work.tier].family!r} family exists for "
+                    f"{ret.work.tier!r}. A weaker judge would pass exactly the "
+                    f"errors this gate exists to catch (arXiv:2509.17995), so "
+                    f"this needs a human."
+                ], False, None
             return False, ["no cross-family verifier rung is available"], True, None
 
         if self.stage == CHECKABLE:
@@ -326,6 +435,18 @@ def run_gate(ret: Return, *, checkable=None, judgment=None,
     if not ok:
         return Verdict(ret, JUDGMENT, False, reasons, retryable, tier)
 
+    # Last, and only in the one admissible direction: a model that says it is
+    # unsure gets escalated rather than believed. Checked AFTER the real gates
+    # so that a confident wrong answer is still caught on its merits — the
+    # confidence field never substitutes for a check.
+    stated = ret.record.get("confidence")
+    if isinstance(stated, (int, float)) and stated < LOW_CONFIDENCE:
+        return Verdict(ret, DEFERRED, False,
+                       [f"the agent reported confidence {stated:.2f}, below "
+                        f"{LOW_CONFIDENCE}. Escalating rather than accepting a "
+                        f"self-declared guess."],
+                       True, tier)
+
     return Verdict(ret, PASSED, True, [], False, tier)
 
 
@@ -337,7 +458,10 @@ def escalate(verdicts: list[Verdict], run_id: str,
     into an empty file. This file is the one a human writes in — resolutions,
     notes, decisions — and nothing here may rewrite it.
     """
-    actionable = [v for v in verdicts if v.failure_class == "quality"]
+    # `deferred` reaches here only when the ladder ran out of rungs, which is
+    # exactly the case a person has to decide.
+    actionable = [v for v in verdicts
+                  if v.failure_class in ("quality", "deferred")]
     if not actionable:
         return 0
 

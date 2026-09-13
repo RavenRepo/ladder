@@ -56,6 +56,7 @@ class RunResult:
     stopped_because: str = ""
     unfinished: list[str] = dataclasses.field(default_factory=list)
     explored: int = 0
+    deferred: int = 0
 
 
 def _run_id(name: str) -> str:
@@ -170,6 +171,22 @@ def execute(*, name: str, capability: str, lane: str, floor_tier: str,
                     continue
 
                 klass = verdict.failure_class
+                if klass == "deferred":
+                    # Escalate on the agent's own uncertainty. Costs a rung,
+                    # not a retry cap: the first attempt was not wrong, it was
+                    # honest, and spending its retry budget on that would make
+                    # honesty expensive.
+                    upward = [t for t in escalation_path(ret.work.tier, weights=weights)
+                              if surfaces is None or t.surface in surfaces]
+                    if upward:
+                        result.deferred += 1
+                        pending.append((ret.work.instance, ret.work.attempt,
+                                        upward[0].name, verdict.reason_text))
+                    else:
+                        # Top of the ladder and still unsure: a person decides.
+                        verdicts_for_queue.append(verdict)
+                    continue
+
                 if klass == "transport":
                     result.transport_failed += 1
                     if ret.work.attempt < stop.max_attempts:
@@ -270,6 +287,7 @@ def write_record(result: RunResult, *, capability: str, lane: str,
         f"| malformed | {result.malformed} |",
         f"| **total dispatched** | **{result.dispatched}** |",
         f"| of which exploring one rung cheaper | {result.explored} |",
+        f"| escalated on the agent's own low confidence | {result.deferred} |",
         "",
         "## Cost",
         "",

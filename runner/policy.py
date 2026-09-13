@@ -84,7 +84,7 @@ class Outcome:
 
     capability: str
     tier: str
-    verdict: str              # pass | fail | transport | malformed
+    verdict: str              # pass | quality | transport | malformed | deferred
     gate_stage: str           # script | checkable | judgment | pass
     reason: str = ""
     cost_usd: float = 0.0
@@ -172,7 +172,11 @@ def tally(outcomes: list[Outcome]) -> dict[tuple[str, str], Stats]:
     stats: dict[tuple[str, str], Stats] = collections.defaultdict(Stats)
     for outcome in outcomes:
         cell = stats[(outcome.capability, outcome.tier)]
-        if outcome.verdict == "transport":
+        if outcome.verdict in ("transport", "deferred"):
+            # `deferred` is an honest low-confidence signal that we acted on.
+            # Counting it against the rung would punish the model for telling
+            # the truth and train the next one to overclaim instead — and
+            # overclaiming is the failure this gate cannot see.
             cell.transport += 1
             continue
         cell.trials += 1

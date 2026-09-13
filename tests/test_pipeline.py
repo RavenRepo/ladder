@@ -401,5 +401,115 @@ class TestLaunchValidation(unittest.TestCase):
         self.assertEqual(seen, {False})
 
 
+class TestNoWeakJudgeOnStrongWork(unittest.TestCase):
+    """Gate 3 refuses a weaker verifier rather than falling back to one.
+
+    Verification skill tracks the verifier's own generation ability, and errors
+    from a STRONGER generator are the hardest to detect because they are
+    internally consistent and wrong (arXiv:2509.17995). A weaker judge does not
+    give a weaker gate; it gives a gate that passes exactly what it was
+    installed to catch.
+    """
+
+    def test_the_top_rung_has_no_admissible_judgment_verifier(self):
+        self.assertIsNone(ModelVerifier(JUDGMENT).pick("opus-5"))
+
+    def test_a_weaker_cross_family_rung_is_never_chosen_for_judgment(self):
+        for tier in tiers.LADDER:
+            chosen = ModelVerifier(JUDGMENT).pick(tier.name)
+            if chosen is not None:
+                self.assertLessEqual(
+                    tiers.BY_NAME[chosen].rank, tier.rank,
+                    f"gate 3 put {chosen} (rank {tiers.BY_NAME[chosen].rank}) "
+                    f"on {tier.name} (rank {tier.rank})")
+
+    def test_refusing_routes_to_a_human_and_is_not_retried(self):
+        """Retrying changes nothing: no rung on the ladder may judge this."""
+        ok, reasons, retryable, tier = ModelVerifier(JUDGMENT)(
+            Return(Work("c", "i", "p", "opus-5"),
+                   {"capability": "c", "instance": "i",
+                    "claims": [{"statement": "s", "evidence": "https://a.example/x"}]},
+                   "", True))
+        self.assertFalse(ok)
+        self.assertFalse(retryable)
+        self.assertIsNone(tier)
+
+    def test_gate_2_may_still_use_a_cheap_rung_on_the_top_rung(self):
+        """Checkable claims do not need strength — that is the whole point of
+        splitting stage 2 from stage 3."""
+        self.assertIsNotNone(ModelVerifier(CHECKABLE).pick("opus-5"))
+
+
+class TestNoFakeCompletion(unittest.TestCase):
+    """Frontier models cheat on repo tasks at ~49-54% (arXiv:2510.20270), and
+    most exploits are syntactically visible — so they are caught for free."""
+
+    def _record(self, statement):
+        return {"capability": "c", "instance": "i",
+                "claims": [{"statement": statement,
+                            "evidence": "https://a.example/x"}]}
+
+    def test_placeholder_markers_are_rejected(self):
+        from runner.gate import check_no_fake_completion
+        for marker in ("TODO: finish this", "added test.skip for now",
+                       "raise NotImplementedError", "FIXME later",
+                       "a stub implementation", "will implement later"):
+            self.assertTrue(check_no_fake_completion(self._record(marker)),
+                            f"not caught: {marker}")
+
+    def test_honest_work_passes(self):
+        from runner.gate import check_no_fake_completion
+        self.assertEqual(
+            check_no_fake_completion(self._record("replaced the loop with a map")),
+            [])
+
+    def test_it_runs_inside_gate_1(self):
+        errors = check_shape(self._record("TODO: implement the branch"))
+        self.assertTrue(any("placeholder" in e for e in errors))
+
+    def test_artifact_text_is_scanned_too(self):
+        from runner.gate import check_no_fake_completion
+        self.assertTrue(check_no_fake_completion(
+            self._record("implemented the parser"),
+            artifact_text="def parse():\n    raise NotImplementedError"))
+
+
+class TestLowConfidenceDeferral(unittest.TestCase):
+    """The one admissible use of self-reported confidence: low escalates,
+    high means nothing (arXiv:2412.14737, arXiv:2604.01457)."""
+
+    def _ret(self, confidence):
+        return Return(Work("c", "i", "p", "haiku-4.5"),
+                      {"capability": "c", "instance": "i",
+                       "claims": [{"statement": "s",
+                                   "evidence": "https://a.example/x"}],
+                       "confidence": confidence}, "", True)
+
+    def test_low_confidence_defers(self):
+        verdict = run_gate(self._ret(0.3))
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.failure_class, "deferred")
+
+    def test_high_confidence_grants_nothing_extra(self):
+        """A confident answer passes because it passed the gates, not because
+        it was confident."""
+        self.assertTrue(run_gate(self._ret(0.99)).ok)
+
+    def test_high_confidence_cannot_rescue_a_failing_record(self):
+        bad = Return(Work("c", "i", "p", "haiku-4.5"),
+                     {"capability": "c", "instance": "i", "claims": [],
+                      "confidence": 1.0}, "", True)
+        self.assertFalse(run_gate(bad).ok)
+
+    def test_deferral_is_not_counted_against_the_rung(self):
+        """Punishing an honest low-confidence signal would train the next model
+        to overclaim — the one failure this gate cannot detect."""
+        rows = ([Outcome("c", "haiku-4.5", "deferred", "deferred")] * 20
+                + [Outcome("c", "haiku-4.5", "pass", "pass")] * 12)
+        cell = tally(rows)[("c", "haiku-4.5")]
+        self.assertEqual(cell.trials, 12)
+        self.assertEqual(cell.rate, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

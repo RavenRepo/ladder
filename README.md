@@ -296,6 +296,7 @@ because they go to different places:
 | **quality failed** | a real return that failed a gate | retried **with the reason**, one rung up; to the human queue at the cap |
 | **transport failed** | never answered — timeout, 401, 429, 502 | retried **clean**; **excluded from the pass rate**; never reaches the human queue |
 | **malformed** | answered, but not in the schema | logged, dropped, not retried; **counts against the rung** |
+| **deferred** | passed every gate but reported confidence below 0.5 | escalated one rung **without** consuming a retry; **excluded from the pass rate** — the answer was honest, not wrong |
 
 That third row is load-bearing. During development the proxy's upstream went
 502 mid-sweep; all 16 dispatches were classified `transport`, kept out of the
@@ -337,17 +338,36 @@ human moves the rules that decide what the numbers mean.
   per-query difficulty estimate. If a capability's instances vary too much for
   one tier, `needs_split` says so and the fix is to split the capability — no
   routing change repairs it.
-- **Self-reported confidence is inadmissible anywhere automated.** A return may
-  carry it for the human queue. Nothing branches on it. See
-  `docs/principles.md` §5.
+- **Self-reported confidence is admissible in one direction only.** Low
+  confidence escalates; high confidence grants nothing — never a pass, never a
+  tiebreak. Verbalized confidence is biased toward overconfidence, so the
+  confident direction carries no information. See `docs/principles.md` §5.
+- **Gate 3 refuses rather than falling back to a weaker verifier.** Work from
+  the top rung has no admissible judge on the ladder and goes to a human. A weak
+  judge does not weaken the gate — it passes exactly what the gate was installed
+  to catch, while reporting success.
+- **Down-routing is not equally safe in both lanes.** Long-horizon failures
+  accumulate, so a model 3% worse per step is catastrophically worse over a
+  thick-lane trajectory. Raise `floor_tier` there.
 - **The thick lane has only one model family**, so `gate: full` is impossible
   there — the linter catches it. Cross-family verification currently requires
   the thin lane.
-- **Expect the boring end of the savings range.** The routing literature's
-  headline numbers are softer than they look; RouteLLM's 3.66× is measured
-  against a random router at equal quality, not against always calling the
-  strong model, and the same router delivers 1.41× on MMLU. The reason to run
-  this is not a headline multiple — it is that the run record makes the
-  question answerable on *your* workload.
+- **Expect the boring end of the savings range — or none.** RouteLLM's 3.66× is
+  measured against a *random router at equal quality*, not against always
+  calling the strong model, and the same router gives 1.41× on MMLU. The safe
+  down-routing ceiling may be ~20% of queries (arXiv:2404.14618). Across 400K
+  instances and 33 models, several published routers — including commercial
+  OpenRouter — **fail to beat Best-Single-Model** (arXiv:2601.07206), and Random
+  is competitive on math and code (arXiv:2504.07113). Judge-scored benchmarks
+  inflate cheap models and verifiable ones deflate them; this workspace gates on
+  verifiable evidence, so assume the low end. The reason to run it is not a
+  headline multiple — it is that the run record answers the question for *your*
+  workload, and "the expensive rung was right all along" is a real result
+  obtained cheaply.
+- **No per-query difficulty estimation, deliberately.** 21 routing methods
+  across 5 benchmarks all converge far below oracle, because routers learn
+  global "code is hard" trends rather than query-specific signal
+  (arXiv:2606.07587). The unit of learning here is the capability — a
+  category-level signal, stated as design rather than discovered as a failure.
 - **This does not fix a badly defined capability**, and no amount of graph
   structure will.

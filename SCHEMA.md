@@ -53,7 +53,18 @@ scorer        none | tests | script   — whether an executable check exists
 `risk_class` is not decoration. `irreversible` capabilities — anything that
 sends, pays, publishes, or writes outside this workspace — are **excluded from
 downward exploration entirely**. The policy may never trial a cheaper rung on
-work that cannot be taken back. It runs at `floor_tier` or above, always.
+work that cannot be taken back: exploration is a controlled experiment, and an
+experiment you cannot undo is not controlled. Such a capability runs at
+`floor_tier` or above, always, and gets cheaper only when a human moves its
+floor.
+
+Related, and currently a rule rather than a threshold: **thick-lane capabilities
+deserve a higher promotion bar than thin-lane ones at equal measured pass
+rate.** Thick-lane work is multi-step, and long-horizon agent failures
+*accumulate* rather than occurring in isolation (arXiv:2604.11978) — a model 3%
+worse per step is catastrophically worse over a trajectory, because the error
+compounds at every hop. A single bad thin-lane classification is just one bad
+classification. Raise `floor_tier` for thick-lane launches accordingly.
 
 `scorer` records whether the capability has a real executable check. Workflow
 search gets its results from tasks that have one (arXiv:2410.10762), and most
@@ -125,16 +136,42 @@ a peer-or-stronger rung. The governing formalisation is the generation-
 verification gap (arXiv:2412.02674), which also reports that self-improvement by
 self-filtering **saturates** — do not expect this loop to keep paying forever.
 
-**Self-reported confidence is not admissible at any gate.** Not as a threshold,
-not as a tiebreak. Models do not reliably self-correct without external feedback
-(arXiv:2310.01798), and the confidence-based deferral that does work needs
-token-level uncertainty and model internals (arXiv:2404.10136) which no surface
-here exposes. A return may *carry* a confidence field for the human queue to
-read; nothing automated may branch on it.
+**Self-reported confidence is admissible in one direction only.** Verbalized
+confidence is badly calibrated (~0.10 ECE at best, arXiv:2412.14737) and biased
+toward overconfidence (arXiv:2604.01457). So:
+
+```
+low confidence  -> escalate one rung, recorded as `deferred`
+high confidence -> nothing. Never a pass, never a tiebreak, never a threshold.
+```
+
+`LOW_CONFIDENCE = 0.5` in `runner/gate.py`. The check runs **after** the real
+gates, so a confident wrong answer is still caught on its merits — confidence
+never substitutes for a check.
+
+A `deferred` outcome is **not counted against the rung**. Punishing an honest
+low-confidence signal would train the next model to overclaim, and overclaiming
+is the one failure this gate cannot see.
+
+**Gate 3 refuses rather than falling back to a weaker verifier.** When the
+generator is the strongest rung available and no peer-or-stronger rung of the
+other family exists, the record goes to a human. Verification skill tracks the
+verifier's own generation ability, and errors from a *stronger* generator are
+hardest to detect because they are internally consistent and wrong
+(arXiv:2509.17995); a model is also a worse verifier than solver of the same
+problem (arXiv:2502.14948). A weak judge does not weaken the gate — it makes the
+gate pass exactly what it was installed to catch, while reporting success.
+
+**Gate 1 also checks for fake completion, for free.** Frontier models cheat on
+multi-file repository tasks at measured rates around 49–54%
+(arXiv:2510.20270), and most exploits are syntactically visible: `TODO`,
+`FIXME`, `test.skip`/`test.only`, `NotImplementedError`, self-described stubs,
+"for now". `check_no_fake_completion()` rejects a record that reports completion
+while containing its own placeholder. A placeholder is a blocker, not evidence.
 
 ---
 
-## Failure classes — three, and they go to different places
+## Failure classes — four, and they go to different places
 
 Lumping them together produces a human queue full of things no human can act on,
 and a human queue that is not actionable does not get read.
@@ -142,6 +179,7 @@ and a human queue that is not actionable does not get read.
 | Class | What it is | What happens |
 |---|---|---|
 | `transport` | the agent never answered: timeout, non-zero exit, 401, 429, CLI missing | retried **without** a reason — there is nothing to correct. Kept **out of the pass-rate tally**. Never goes to the human queue. |
+| `deferred` | the agent passed every gate but reported confidence below `LOW_CONFIDENCE` | escalated one rung, **without** consuming a retry — the answer was honest, not wrong. Kept **out of the pass-rate tally**. Reaches the human queue only at the top of the ladder. |
 | `malformed` | it answered, but not in the schema: prose, an apology, no JSON | logged, dropped, not retried. **Counts against the rate** — a model that cannot hold the schema is unfit for the rung. |
 | `quality` | a real return that fails shape, threshold, or a verifier | retried **with the reason appended**, escalated one rung, and to `needs-human.md` at the retry cap. Counts against the rate. |
 
