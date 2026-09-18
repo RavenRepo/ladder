@@ -12,12 +12,17 @@ Terms are ordered so that each one only uses words defined above it.
 ### Surface
 **A way to reach a model.** Not the model itself — the *road* to it.
 
-This workspace has two live surfaces:
+The default configuration ships with two surfaces:
 
 | Surface | What it is | Has tools? |
 |---|---|---|
-| `kirocc` | an HTTP endpoint at `127.0.0.1:3456` | no |
+| `kirocc` | a local OpenAI-compatible HTTP proxy at `127.0.0.1:3456` | no |
 | `claude-cli` | running `claude -p` as a subprocess | yes |
+
+`kirocc` is the name used in this project for the thin-lane HTTP endpoint. You
+can substitute any OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, or any
+proxy that serves `/v1/models` and `/v1/messages`) by changing `KIROCC_BASE` in
+`runner/substrate.py`.
 
 Why it matters: reaching `haiku-4.5` through `kirocc` costs **91 input tokens**.
 Reaching *the same model* through `claude-cli` costs **22,810**, because the

@@ -127,7 +127,10 @@ This is currently a documented rule rather than a separate threshold — see
 ## 4. The substrate is a claim until you probe it
 
 `pi` advertises 41 models. `omp` advertises 58. `opencode` advertises 7 free
-ones. On probe, on this machine, today:
+ones. On probe, on the machine this was developed on:
+
+> Your probe results will differ. The table below illustrates the *principle*
+> — that most advertised surfaces don't work — not a universal topology.
 
 | Surface | Status |
 |---|---|

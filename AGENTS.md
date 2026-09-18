@@ -28,13 +28,13 @@ want `SKILL.md` instead — and it's already in your prompt.
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 35 tests, under a second, free
+python3 -m unittest discover -s tests -t .   # 79 tests, under a second, free
 ./ladder lint                                 # cheapest check; run after editing a launch
 ./ladder run <launch> --dispatch mock         # full pipeline, spends nothing
 ./ladder probe                                # what is actually reachable
 ```
 
-No build step, no dependencies outside the standard library. Python 3.14.
+No build step, no dependencies outside the standard library. Python 3.11+.
 
 ## Conventions
 
