@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ladder: cut LLM costs with empirical model routing</title>
+  <meta name="description" content="ladder runs recurring LLM work on the cheapest model that still passes a cross-family verifier gate. Open-source, stdlib-only Python CLI by Amit Kumar (@growthperclick).">
+  <meta name="author" content="Amit Kumar">
+  <meta name="keywords" content="LLM cost optimization, model routing, LLM router, cheapest LLM, LLM evaluation, cross-family verification, LLMOps, Python CLI, Amit Kumar, growthperclick">
+  <link rel="canonical" href="https://ravenrepo.github.io/ladder/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#0b1020">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="ladder">
+  <meta property="og:title" content="ladder: cut LLM costs with empirical model routing">
+  <meta property="og:description" content="Run recurring LLM work on the cheapest model that still passes a cross-family verifier. Measured, not guessed. Open source, by Amit Kumar.">
+  <meta property="og:url" content="https://ravenrepo.github.io/ladder/">
+  <meta property="og:image" content="https://ravenrepo.github.io/ladder/og.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="ladder: the cheapest LLM that still passes. Empirical model routing by Amit Kumar.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@growthperclick">
+  <meta name="twitter:creator" content="@growthperclick">
+  <meta name="twitter:title" content="ladder: cut LLM costs with empirical model routing">
+  <meta name="twitter:description" content="Run recurring LLM work on the cheapest model that still passes a cross-family verifier. Open source, by Amit Kumar.">
+  <meta name="twitter:image" content="https://ravenrepo.github.io/ladder/og.png">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Person",
+        "@id": "https://iamamitkumar.dev/#person",
+        "name": "Amit Kumar",
+        "alternateName": ["growthperclick", "RavenRepo"],
+        "url": "https://iamamitkumar.dev",
+        "jobTitle": "Founder and AI engineer",
+        "sameAs": [
+          "https://growthperclick.com",
+          "https://github.com/RavenRepo",
+          "https://x.com/growthperclick",
+          "https://www.linkedin.com/in/growthperclick/",
+          "https://peerlist.io/growthperclick",
+          "https://substack.com/@growthperclick",
+          "https://medium.com/@dev.amitkumar"
+        ]
+      },
+      {
+        "@type": "SoftwareSourceCode",
+        "@id": "https://ravenrepo.github.io/ladder/#software",
+        "name": "ladder",
+        "description": "A model-cost optimizer for recurring LLM work: it runs each recurring task on the cheapest model tier that still passes an external, cross-family verifier gate, and lets counted pass rates decide promotion and demotion.",
+        "url": "https://ravenrepo.github.io/ladder/",
+        "codeRepository": "https://github.com/RavenRepo/ladder",
+        "programmingLanguage": "Python",
+        "runtimePlatform": "Python 3.11+",
+        "license": "https://opensource.org/licenses/MIT",
+        "version": "0.1.0",
+        "keywords": "LLM cost optimization, model routing, LLM evaluation, cross-family verification, LLMOps",
+        "author": { "@id": "https://iamamitkumar.dev/#person" },
+        "maintainer": { "@id": "https://iamamitkumar.dev/#person" }
+      },
+      {
+        "@type": "WebPage",
+        "@id": "https://ravenrepo.github.io/ladder/#webpage",
+        "url": "https://ravenrepo.github.io/ladder/",
+        "name": "ladder: cut LLM costs with empirical model routing",
+        "about": { "@id": "https://ravenrepo.github.io/ladder/#software" },
+        "author": { "@id": "https://iamamitkumar.dev/#person" },
+        "inLanguage": "en"
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://ravenrepo.github.io/ladder/#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "How do I reduce LLM API costs without losing quality?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Measure instead of guessing. ladder starts every recurring task at a deliberately pessimistic floor model, trials a cheaper rung on 15% of dispatches, checks every result with a verifier from a different model family, and only promotes a cheaper model after 12 trials above the bar." }
+          },
+          {
+            "@type": "Question",
+            "name": "How is ladder different from an LLM router?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Most routers predict per-query difficulty. ladder does not: it learns per capability (a recurring class of work) from counted, externally verified outcomes, and it never promotes a model because the model said it was confident." }
+          },
+          {
+            "@type": "Question",
+            "name": "Why does the API surface matter more than the model?",
+            "acceptedAnswer": { "@type": "Answer", "text": "In ladder's measurements the same model cost about 250 times more through a coding-agent CLI than through a plain HTTP endpoint, because the CLI adds about 22,800 tokens of harness to every call. ladder treats a tier as a surface and model pair." }
+          },
+          {
+            "@type": "Question",
+            "name": "What does it take to try ladder?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Python 3.11 or later and nothing else: ladder uses only the standard library. The mock dispatcher runs the full pipeline for free, and the 79 tests run in under a tenth of a second without network access or tokens." }
+          },
+          {
+            "@type": "Question",
+            "name": "Who built ladder?",
+            "acceptedAnswer": { "@type": "Answer", "text": "ladder is built and maintained by Amit Kumar (@growthperclick), a founder and AI engineer who builds open tooling that makes AI coding agents trustworthy and affordable." }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+  <style>
+    :root { --bg:#0b1020; --panel:#121a33; --text:#e8ecf8; --muted:#a6b0cf; --accent:#7cc4ff; --accent2:#9dfcc3; --line:#24305a; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:17px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); }
+    a { color:var(--accent); }
+    main, header, footer { max-width:960px; margin:0 auto; padding:0 20px; }
+    header { padding-top:56px; }
+    .eyebrow { color:var(--accent2); font-weight:600; letter-spacing:.04em; text-transform:uppercase; font-size:13px; }
+    h1 { font-size:clamp(32px,5vw,52px); line-height:1.1; margin:10px 0 16px; }
+    h2 { font-size:28px; margin:48px 0 12px; }
+    h3 { font-size:19px; margin:22px 0 6px; }
+    .lead { font-size:20px; color:var(--muted); max-width:760px; }
+    .cta { display:flex; gap:12px; flex-wrap:wrap; margin:26px 0 8px; }
+    .btn { display:inline-block; padding:11px 18px; border-radius:10px; text-decoration:none; font-weight:600; border:1px solid var(--line); color:var(--text); background:var(--panel); }
+    .btn.primary { background:var(--accent); color:#06101f; border-color:var(--accent); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-top:12px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px; }
+    pre { background:#070b17; border:1px solid var(--line); border-radius:12px; padding:16px; overflow-x:auto; font-size:14.5px; line-height:1.5; }
+    code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    table { border-collapse:collapse; width:100%; font-size:15.5px; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+    details { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 16px; margin:10px 0; }
+    summary { cursor:pointer; font-weight:600; }
+    footer { color:var(--muted); padding:40px 20px 60px; border-top:1px solid var(--line); margin-top:56px; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Open source · Python · MIT</div>
+  <h1>ladder: the cheapest LLM that still passes</h1>
+  <p class="lead">Run recurring LLM work on the cheapest model tier that still passes an external gate, and let the run history, not a guess, decide which model that is.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/RavenRepo/ladder">View on GitHub</a>
+    <a class="btn" href="https://github.com/RavenRepo/ladder/blob/main/docs/GETTING-STARTED.md">Getting started</a>
+    <a class="btn" href="https://github.com/sponsors/RavenRepo">Sponsor</a>
+  </div>
+</header>
+
+<main>
+  <h2>Why</h2>
+  <p>Everything runs on the expensive model because nobody knows which tasks need it. Fixed configurations overspend, and learned routers that predict per-query difficulty often fail to beat simply using the best single model. ladder takes a different route: <strong>don't predict difficulty; measure it.</strong> It occasionally trials a cheaper rung, checks every result with a verifier outside the model that produced it, and promotes or demotes based on counted verdicts. Nothing is ever promoted because a model said it was confident.</p>
+
+  <h2>How it works</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>1. Lane before tier</h3>
+      <p>The same model costs very different amounts depending on how you reach it. A plain HTTP endpoint sent about 91 input tokens for a one-word prompt; a coding-agent CLI sent about 22,800. Choosing the lane matters roughly 250 times more than choosing the model, so a tier is a <em>(surface, model)</em> pair.</p>
+    </div>
+    <div class="card">
+      <h3>2. Cross-family gate</h3>
+      <p>Every return is judged outside the model that produced it, cheapest stage first: a free script check, then a cheap verifier from a <em>different</em> model family, then a peer-or-stronger judge from a different family. A model never judges its own output.</p>
+    </div>
+    <div class="card">
+      <h3>3. The learning loop</h3>
+      <p>Each capability starts at a pessimistic floor. 15% of dispatches trial the cheapest undecided rung. Promotion needs 12 trials above the bar; demotion does not. Transport failures (timeouts, 401, 502) stay out of the pass rate, so an outage never pushes routing up the ladder.</p>
+    </div>
+  </div>
+
+  <h2>Quick start</h2>
+  <p class="muted">Python 3.11+. Standard library only. No build step, no account, no cost.</p>
+<pre><code>git clone https://github.com/RavenRepo/ladder.git &amp;&amp; cd ladder
+./ladder probe                                # which surfaces are reachable
+./ladder lint                                 # check every launch against its own gate
+./ladder run triage-failures --dispatch mock  # full pipeline, fake agents, zero cost
+./ladder policy                               # what the system now believes
+python3 -m unittest discover -s tests -t .    # 79 tests, under 0.1 s, zero tokens</code></pre>
+
+  <h2>Failure classes that keep the numbers honest</h2>
+  <table>
+    <thead><tr><th>Class</th><th>Meaning</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>passed</td><td>cleared every gate stage</td><td>counts toward promotion</td></tr>
+      <tr><td>quality failed</td><td>real return, failed a gate</td><td>retried one rung up with the reason</td></tr>
+      <tr><td>transport failed</td><td>never answered</td><td>retried; excluded from the pass rate</td></tr>
+      <tr><td>malformed</td><td>answered outside the schema</td><td>dropped; counts against the rung</td></tr>
+      <tr><td>deferred</td><td>passed with confidence below 0.5</td><td>escalated one rung; excluded from the pass rate</td></tr>
+    </tbody>
+  </table>
+
+  <h2>FAQ</h2>
+  <details open><summary>How do I reduce LLM API costs without losing quality?</summary><p>Measure instead of guessing. ladder starts every recurring task at a deliberately pessimistic floor model, trials a cheaper rung on 15% of dispatches, checks every result with a verifier from a different model family, and only promotes a cheaper model after 12 trials above the bar.</p></details>
+  <details><summary>How is ladder different from an LLM router?</summary><p>Most routers predict per-query difficulty. ladder does not: it learns per capability (a recurring class of work) from counted, externally verified outcomes, and it never promotes a model because the model said it was confident.</p></details>
+  <details><summary>Why does the API surface matter more than the model?</summary><p>In ladder's measurements the same model cost about 250 times more through a coding-agent CLI than through a plain HTTP endpoint, because the CLI adds about 22,800 tokens of harness to every call. ladder treats a tier as a surface and model pair.</p></details>
+  <details><summary>What does it take to try ladder?</summary><p>Python 3.11 or later and nothing else: ladder uses only the standard library. The mock dispatcher runs the full pipeline for free, and the 79 tests run in under a tenth of a second without network access or tokens.</p></details>
+  <details><summary>Who built ladder?</summary><p>ladder is built and maintained by <a href="https://iamamitkumar.dev">Amit Kumar</a> (<a href="https://x.com/growthperclick">@growthperclick</a>), a founder and AI engineer who builds open tooling that makes AI coding agents trustworthy and affordable.</p></details>
+
+  <h2>About the author</h2>
+  <p><a href="https://iamamitkumar.dev">Amit Kumar</a> spent 16 years in growth and go-to-market before building AI agent systems. He runs Claude Code and Codex agents every day and builds the tooling around them: model routing, evals, guardrails and governance. More at <a href="https://growthperclick.com">growthperclick.com</a>.</p>
+  <p>If ladder cuts your model bill, please consider <a href="https://github.com/sponsors/RavenRepo">sponsoring its development</a>.</p>
+</main>
+
+<footer>
+  <p>ladder is MIT-licensed. Source: <a href="https://github.com/RavenRepo/ladder">github.com/RavenRepo/ladder</a> ·
+  Author: <a href="https://iamamitkumar.dev" rel="author">Amit Kumar</a> ·
+  <a href="https://github.com/RavenRepo">GitHub</a> · <a href="https://x.com/growthperclick">X</a> ·
+  <a href="https://www.linkedin.com/in/growthperclick/">LinkedIn</a> · <a href="https://growthperclick.com">growthperclick.com</a></p>
+</footer>
+</body>
+</html>
