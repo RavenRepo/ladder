@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use ladder in your work, please cite it as below."
+title: "ladder: empirical model routing for recurring LLM work"
+type: software
+authors:
+  - given-names: Amit
+    family-names: Kumar
+    alias: growthperclick
+    website: "https://iamamitkumar.dev"
+repository-code: "https://github.com/RavenRepo/ladder"
+url: "https://ravenrepo.github.io/ladder/"
+abstract: >-
+  ladder runs recurring LLM work on the cheapest model tier that still passes
+  an external, cross-family verifier gate. It trials cheaper rungs on a fraction
+  of dispatches and promotes or demotes each capability from counted,
+  externally verified outcomes instead of predicted difficulty.
+keywords:
+  - LLM cost optimization
+  - model routing
+  - LLM evaluation
+  - cross-family verification
+  - LLMOps
+license: MIT
+version: 0.1.0
+date-released: "2026-09-18"
