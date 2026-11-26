@@ -1,10 +1,11 @@
-# ladder
+# ladder: cut LLM costs with empirical model routing
 
 [![CI](https://github.com/RavenRepo/ladder/actions/workflows/ci.yml/badge.svg)](https://github.com/RavenRepo/ladder/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors)](https://github.com/sponsors/RavenRepo)
+[![Website](https://img.shields.io/badge/website-ravenrepo.github.io%2Fladder-7cc4ff.svg)](https://ravenrepo.github.io/ladder/)
 
 Run recurring LLM work on the cheapest model tier that still passes an external gate, and let the run history -- not a guess -- decide which model that is.
 
@@ -220,9 +221,27 @@ The thick-lane surface shells out to `claude -p` (the Claude Code CLI). Thick-la
 
 ---
 
+## FAQ
+
+**How do I reduce LLM API costs without losing quality?**
+Measure instead of guessing. `ladder` starts every recurring task at a deliberately pessimistic floor model, trials a cheaper rung on 15% of dispatches, checks every result with a verifier from a different model family, and only promotes a cheaper model after 12 trials above the bar.
+
+**How is `ladder` different from an LLM router?**
+Most routers predict per-query difficulty. `ladder` learns per capability (a recurring class of work) from counted, externally verified outcomes, and never promotes a model because the model said it was confident.
+
+**Why does the API surface matter more than the model?**
+The same model cost about 250x more through `claude -p` than through a plain HTTP endpoint, because the CLI adds about 22,800 tokens of harness to every call. A tier is a *(surface, model)* pair for that reason.
+
+**What does it take to try it?**
+Python 3.11+ and nothing else. The mock dispatcher runs the full pipeline for free, and the 79 tests run in under a tenth of a second with no network and no tokens.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute, code conventions, testing, and the PR process.
+
+## Author
+
+`ladder` is built and maintained by [Amit Kumar](https://iamamitkumar.dev) ([@growthperclick](https://x.com/growthperclick)), a founder and AI engineer who builds open tooling around AI coding agents: model routing, evals, guardrails and governance. More at [growthperclick.com](https://growthperclick.com) and on [GitHub](https://github.com/RavenRepo).
 
 ## Sponsor
 
