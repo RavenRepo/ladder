@@ -1,5 +1,11 @@
 # ladder
 
+[![CI](https://github.com/RavenRepo/ladder/actions/workflows/ci.yml/badge.svg)](https://github.com/RavenRepo/ladder/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors)](https://github.com/sponsors/RavenRepo)
+
 Run recurring LLM work on the cheapest model tier that still passes an external gate, and let the run history -- not a guess -- decide which model that is.
 
 Everything runs on the expensive model because nobody knows which tasks need it. `ladder` finds out empirically: it occasionally trials a cheaper rung, checks every result with a verifier *outside* the model that produced it, and promotes or demotes based on counted verdicts. Nothing is ever promoted because a model said it was confident.
@@ -217,6 +223,10 @@ The thick-lane surface shells out to `claude -p` (the Claude Code CLI). Thick-la
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute, code conventions, testing, and the PR process.
+
+## Sponsor
+
+`ladder` is free and open source. Sponsorship pays for re-measuring the ladder as new models and surfaces ship, for the verifier runs behind those measurements, and for keeping the tool dependency-free. If it cuts your model bill, please consider [sponsoring on GitHub](https://github.com/sponsors/RavenRepo).
 
 ## License
 
